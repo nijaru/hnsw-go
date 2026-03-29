@@ -97,7 +97,7 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 	layout := NewNodeLayout(config)
 	totalSize := HeaderSize + (initialNodes * layout.NodeSize)
 
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0666)
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o666)
 	if err != nil {
 		return nil, err
 	}
@@ -117,7 +117,13 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 		totalSize = uint32(info.Size())
 	}
 
-	data, err := unix.Mmap(int(file.Fd()), 0, int(totalSize), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
+	data, err := unix.Mmap(
+		int(file.Fd()),
+		0,
+		int(totalSize),
+		unix.PROT_READ|unix.PROT_WRITE,
+		unix.MAP_SHARED,
+	)
 	if err != nil {
 		file.Close()
 		return nil, err
@@ -177,7 +183,9 @@ func (s *Storage) GetNeighbors(id uint32, layer int) []uint32 {
 	var count int
 
 	if layer == 0 {
-		count = int(binary.LittleEndian.Uint32(data[s.layout.L0CountOffset : s.layout.L0CountOffset+4]))
+		count = int(
+			binary.LittleEndian.Uint32(data[s.layout.L0CountOffset : s.layout.L0CountOffset+4]),
+		)
 		neighborsData = data[s.layout.L0NeighborsOffset : s.layout.L0NeighborsOffset+(s.config.M_max0*4)]
 	} else {
 		countsOffset := s.layout.UpperCountsOffset + uint32(layer-1)*4
@@ -193,7 +201,10 @@ func (s *Storage) GetNeighbors(id uint32, layer int) []uint32 {
 func (s *Storage) SetNeighbors(id uint32, layer int, neighbors []uint32) {
 	data := s.GetNodeData(id)
 	if layer == 0 {
-		binary.LittleEndian.PutUint32(data[s.layout.L0CountOffset:s.layout.L0CountOffset+4], uint32(len(neighbors)))
+		binary.LittleEndian.PutUint32(
+			data[s.layout.L0CountOffset:s.layout.L0CountOffset+4],
+			uint32(len(neighbors)),
+		)
 		neighborsData := data[s.layout.L0NeighborsOffset : s.layout.L0NeighborsOffset+(s.config.M_max0*4)]
 		copy(unsafe.Slice((*uint32)(unsafe.Pointer(&neighborsData[0])), s.config.M_max0), neighbors)
 	} else {
@@ -258,7 +269,13 @@ func (s *Storage) Grow(newAllocated uint32) error {
 	}
 
 	// Remap
-	data, err := unix.Mmap(int(s.file.Fd()), 0, int(newSize), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
+	data, err := unix.Mmap(
+		int(s.file.Fd()),
+		0,
+		int(newSize),
+		unix.PROT_READ|unix.PROT_WRITE,
+		unix.MAP_SHARED,
+	)
 	if err != nil {
 		return fmt.Errorf("mmap: %w", err)
 	}
