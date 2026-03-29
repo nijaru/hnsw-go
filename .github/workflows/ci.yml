@@ -17,8 +17,36 @@ jobs:
       with:
         go-version: '1.26'
 
+    - name: Verify dependencies (go mod tidy)
+      run: |
+        go mod tidy
+        git diff --exit-code
+
+    - name: Install Formatters
+      run: |
+        go install golang.org/x/tools/cmd/goimports@latest
+        go install mvdan.cc/gofumpt@latest
+        go install github.com/segmentio/golines@latest
+
+    - name: Check Formatting
+      run: |
+        # Check if golines/gofumpt would make any changes
+        UNFORMATTED=$(golines --base-formatter gofumpt -l .)
+        if [ -n "$UNFORMATTED" ]; then
+          echo "The following files are not formatted correctly:"
+          echo "$UNFORMATTED"
+          echo "Please run 'goimports -w .' then 'golines --base-formatter gofumpt -w .' locally."
+          exit 1
+        fi
+
+    - name: Vet (Static Analysis)
+      run: go vet ./...
+
     - name: Build
       run: go build -v ./...
 
-    - name: Test
-      run: go test -v ./...
+    - name: Test (with race detector & coverage)
+      run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
+
+    - name: Run Benchmarks
+      run: go test -v -bench=. -benchtime=1s -benchmem ./...

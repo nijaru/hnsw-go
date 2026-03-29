@@ -1,4 +1,4 @@
-.PHONY: fmt vet test build tidy check
+.PHONY: fmt vet test bench tidy check
 
 fmt:
 	@files="$$(git ls-files '*.go')"; \
@@ -13,12 +13,15 @@ vet:
 	@go vet ./...
 
 test:
-	@go test ./...
+	@go test -v -race ./...
+
+bench:
+	@go test -v -bench=. -benchmem ./...
 
 build:
-	@go build ./...
+	@go build -v ./...
 
 tidy:
 	@go mod tidy
 
-check: fmt vet test build
+check: fmt vet test bench build
