@@ -220,13 +220,28 @@ func NewIndex(storage *Storage, distFunc DistanceFunc, m, efSearch, efConst int)
 	return idx
 }
 
+// SetEfSearch updates the search effort parameter.
+func (idx *Index) SetEfSearch(ef int) {
+	idx.mu.Lock()
+	idx.efSearch = ef
+	idx.mu.Unlock()
+}
+
+// SetEfConst updates the construction effort parameter.
+func (idx *Index) SetEfConst(ef int) {
+	idx.mu.Lock()
+	idx.efConst = ef
+	idx.mu.Unlock()
+}
+
 // Search returns the top K nearest neighbors for the query vector.
 func (idx *Index) Search(query []float32, k int) []Node {
 	idx.mu.RLock()
-	defer idx.mu.RUnlock()
 	currMaxLevel := idx.maxLevel
 	currEntryPoint := idx.entryPoint
 	nodeCount := idx.nodeCount
+	efSearch := idx.efSearch
+	idx.mu.RUnlock()
 
 	if nodeCount == 0 {
 		return nil
@@ -265,7 +280,7 @@ func (idx *Index) Search(query []float32, k int) []Node {
 		c := buf.candidates.Pop()
 		f := buf.results.Nodes[0] // furthest in results
 
-		if c.Distance > f.Distance {
+		if c.Distance > f.Distance && len(buf.results.Nodes) >= efSearch {
 			break
 		}
 
@@ -277,10 +292,10 @@ func (idx *Index) Search(query []float32, k int) []Node {
 			buf.visit(nb)
 
 			d := idx.distFunc(query, idx.storage.GetVector(nb))
-			if len(buf.results.Nodes) < idx.efSearch || d < f.Distance {
+			if len(buf.results.Nodes) < efSearch || d < f.Distance {
 				buf.candidates.Push(Node{ID: nb, Distance: d})
 				buf.results.Push(Node{ID: nb, Distance: d})
-				if len(buf.results.Nodes) > idx.efSearch {
+				if len(buf.results.Nodes) > efSearch {
 					buf.results.Pop()
 				}
 				f = buf.results.Nodes[0]
@@ -295,14 +310,9 @@ func (idx *Index) Search(query []float32, k int) []Node {
 	// Reverse to get closest first
 	slices.Reverse(buf.out)
 
-	if len(buf.out) > k {
-		buf.out = buf.out[:k]
-	}
-
-	// We have to copy here because buf.out will be reused.
-	// This is the only allocation in the search path (1 alloc).
-	res := make([]Node, len(buf.out))
-	copy(res, buf.out)
+	actualK := min(k, len(buf.out))
+	res := make([]Node, actualK)
+	copy(res, buf.out[:actualK])
 	return res
 }
 
@@ -330,9 +340,11 @@ func (idx *Index) Insert(vec []float32) error {
 		return nil
 	}
 
+	idx.mu.RLock()
 	currEntryPoint := idx.entryPoint
 	currMaxLevel := idx.maxLevel
-	idx.mu.Unlock()
+	efConst := idx.efConst
+	idx.mu.RUnlock()
 	idx.mu.RLock() // Protects mmap from Grow() during traversal
 
 	// Initial greedy search to the insertion level
@@ -359,7 +371,7 @@ func (idx *Index) Insert(vec []float32) error {
 	idx.storage.SetVector(id, vec)
 
 	for l := min(level, currMaxLevel); l >= 0; l-- {
-		candidates := idx.findNeighborsAtLayer(vec, currNode, l, idx.efConst)
+		candidates := idx.findNeighborsAtLayer(vec, currNode, l, efConst)
 
 		limit := idx.m
 		if l == 0 {
@@ -412,7 +424,9 @@ func (idx *Index) randomLevel() int {
 }
 
 func (idx *Index) findNeighborsAtLayer(vec []float32, entry uint32, layer, ef int) []Node {
+	idx.mu.RLock()
 	nodeCount := idx.nodeCount
+	idx.mu.RUnlock()
 
 	buf := idx.pool.Get().(*searchBuffer)
 	defer idx.pool.Put(buf)
@@ -427,7 +441,7 @@ func (idx *Index) findNeighborsAtLayer(vec []float32, entry uint32, layer, ef in
 		c := buf.candidates.Pop()
 		f := buf.results.Nodes[0]
 
-		if c.Distance > f.Distance {
+		if c.Distance > f.Distance && len(buf.results.Nodes) >= ef {
 			break
 		}
 
