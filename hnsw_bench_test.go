@@ -13,7 +13,7 @@ func BenchmarkHNSWBuild(b *testing.B) {
 	config := IndexConfig{
 		Dims:     128,
 		M:        16,
-		M_max0:   32,
+		MMax0:    32,
 		MaxLevel: 16,
 	}
 
@@ -23,7 +23,7 @@ func BenchmarkHNSWBuild(b *testing.B) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2, 16, 100, 100)
+	idx := NewIndex(storage, L2, 100, 100)
 
 	vec := make([]float32, 128)
 	for i := range vec {
@@ -44,7 +44,7 @@ func BenchmarkHNSWSearch(b *testing.B) {
 	config := IndexConfig{
 		Dims:     128,
 		M:        16,
-		M_max0:   32,
+		MMax0:    32,
 		MaxLevel: 16,
 	}
 
@@ -55,7 +55,7 @@ func BenchmarkHNSWSearch(b *testing.B) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2, 16, 100, 100)
+	idx := NewIndex(storage, L2, 100, 100)
 
 	vec := make([]float32, 128)
 	for i := 0; i < numNodes; i++ {
