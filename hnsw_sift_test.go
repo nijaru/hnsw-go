@@ -1,0 +1,193 @@
+package hnsw
+
+import (
+	"encoding/binary"
+	"fmt"
+	"math"
+	"math/rand/v2"
+	"os"
+	"testing"
+)
+
+func loadSIFT10kBinary(t *testing.T) (vectors, queries [][]float32, groundTruth [][]int32) {
+	t.Helper()
+	path := "sift10k_test.bin"
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		t.Skip("sift10k_test.bin not found — run conversion first")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	r := bytesReader{data: data}
+	numVec := r.uint32()
+	numQuery := r.uint32()
+	dims := r.uint32()
+	topK := r.uint32()
+
+	t.Logf("Loading SIFT 10k: %d vectors, %d queries, %d dims, topK=%d", numVec, numQuery, dims, topK)
+
+	vectors = make([][]float32, numVec)
+	for i := range vectors {
+		vectors[i] = r.float32s(dims)
+	}
+
+	queries = make([][]float32, numQuery)
+	for i := range queries {
+		queries[i] = r.float32s(dims)
+	}
+
+	groundTruth = make([][]int32, numQuery)
+	for i := range groundTruth {
+		groundTruth[i] = r.int32s(topK)
+	}
+
+	return
+}
+
+type bytesReader struct {
+	data   []byte
+	offset int
+}
+
+func (r *bytesReader) uint32() uint32 {
+	v := binary.LittleEndian.Uint32(r.data[r.offset:])
+	r.offset += 4
+	return v
+}
+
+func (r *bytesReader) float32s(n uint32) []float32 {
+	out := make([]float32, n)
+	for i := range out {
+		bits := binary.LittleEndian.Uint32(r.data[r.offset:])
+		out[i] = math.Float32frombits(bits)
+		r.offset += 4
+	}
+	return out
+}
+
+func (r *bytesReader) int32s(n uint32) []int32 {
+	out := make([]int32, n)
+	for i := range out {
+		out[i] = int32(binary.LittleEndian.Uint32(r.data[r.offset:]))
+		r.offset += 4
+	}
+	return out
+}
+
+func recallAtK(results []Node, groundTruth []int32, k int) float64 {
+	gtSet := make(map[uint32]struct{}, k)
+	for i := 0; i < k && i < len(groundTruth); i++ {
+		gtSet[uint32(groundTruth[i])] = struct{}{}
+	}
+
+	hits := 0
+	for i := 0; i < k && i < len(results); i++ {
+		if _, ok := gtSet[results[i].ID]; ok {
+			hits++
+		}
+	}
+	return float64(hits) / float64(k)
+}
+
+func TestSIFT10kRecall(t *testing.T) {
+	vectors, queries, groundTruth := loadSIFT10kBinary(t)
+
+	path := fmt.Sprintf("sift10k_recall_%d.hnsw", rand.Int64())
+	defer os.Remove(path)
+
+	config := IndexConfig{
+		Dims:     128,
+		M:        16,
+		MMax0:    32,
+		MaxLevel: 16,
+	}
+
+	storage, err := NewStorage(path, config, uint32(len(vectors)))
+	if err != nil {
+		t.Fatalf("create storage: %v", err)
+	}
+	defer storage.Close()
+
+	idx := NewIndex(storage, L2, 200, 200)
+
+	t.Logf("Inserting %d vectors...", len(vectors))
+	for i, vec := range vectors {
+		if err := idx.Insert(vec); err != nil {
+			t.Fatalf("insert %d: %v", i, err)
+		}
+	}
+
+	stats := idx.Stats()
+	t.Logf("Built: %d nodes, maxLevel=%d", stats.NodeCount, stats.MaxLevel)
+
+	k := 10
+	totalRecall := 0.0
+	for i, query := range queries {
+		results, err := idx.Search(query, k)
+		if err != nil {
+			t.Fatalf("search %d: %v", i, err)
+		}
+		totalRecall += recallAtK(results, groundTruth[i], k)
+	}
+
+	avgRecall := totalRecall / float64(len(queries))
+	t.Logf("Recall@%d: %.4f (%d queries)", k, avgRecall, len(queries))
+
+	if avgRecall < 0.80 {
+		t.Errorf("recall %.4f below threshold 0.80", avgRecall)
+	}
+}
+
+func TestSIFT10kPersistence(t *testing.T) {
+	vectors, _, _ := loadSIFT10kBinary(t)
+
+	path := fmt.Sprintf("sift10k_persist_%d.hnsw", rand.Int64())
+	defer os.Remove(path)
+
+	config := IndexConfig{
+		Dims:     128,
+		M:        16,
+		MMax0:    32,
+		MaxLevel: 16,
+	}
+
+	func() {
+		storage, err := NewStorage(path, config, uint32(len(vectors)))
+		if err != nil {
+			t.Fatalf("create storage: %v", err)
+		}
+		defer storage.Close()
+
+		idx := NewIndex(storage, L2, 100, 100)
+		for i, vec := range vectors {
+			if err := idx.Insert(vec); err != nil {
+				t.Fatalf("insert %d: %v", i, err)
+			}
+		}
+	}()
+
+	storage2, err := NewStorage(path, config, 0)
+	if err != nil {
+		t.Fatalf("reopen storage: %v", err)
+	}
+	defer storage2.Close()
+
+	idx2 := NewIndex(storage2, L2, 200, 200)
+	stats := idx2.Stats()
+	if stats.NodeCount != uint32(len(vectors)) {
+		t.Errorf("expected %d nodes after reopen, got %d", len(vectors), stats.NodeCount)
+	}
+
+	query := vectors[0]
+	results, err := idx2.Search(query, 5)
+	if err != nil {
+		t.Fatalf("search after reopen: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("no results after reopen")
+	}
+	t.Logf("Persistence OK: %d nodes, top result ID=%d dist=%f", stats.NodeCount, results[0].ID, results[0].Distance)
+}
