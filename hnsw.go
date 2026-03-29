@@ -140,14 +140,7 @@ func (b *searchBuffer) isVisited(id uint32) bool {
 
 func (b *searchBuffer) visit(id uint32) {
 	if int(id) >= len(b.visited) {
-		// grow visited if necessary
-		newCap := len(b.visited) * 2
-		if newCap <= int(id) {
-			newCap = int(id) + 1024
-		}
-		newVisited := make([]uint32, newCap)
-		copy(newVisited, b.visited)
-		b.visited = newVisited
+		return
 	}
 	b.visited[id] = b.gen
 }
@@ -189,8 +182,12 @@ type Index struct {
 }
 
 // NewIndex creates a new HNSW index.
-func NewIndex(storage *Storage, distFunc DistanceFunc, m, efSearch, efConst int) *Index {
-	mMax0 := m * 2
+func NewIndex(storage *Storage, distFunc DistanceFunc, efSearch, efConst int) *Index {
+	m := int(storage.config.M)
+	mMax0 := int(storage.config.MMax0)
+	if mMax0 == 0 {
+		mMax0 = m * 2
+	}
 	idx := &Index{
 		storage:    storage,
 		distFunc:   distFunc,
@@ -204,7 +201,7 @@ func NewIndex(storage *Storage, distFunc DistanceFunc, m, efSearch, efConst int)
 
 	idx.pool.New = func() any {
 		return &searchBuffer{
-			visited:    make([]uint32, 16384), // Start with a decent size
+			visited:    make([]uint32, 16384),
 			results:    MaxNodeHeap{Nodes: make([]Node, 0, efSearch+mMax0+1)},
 			candidates: NodeHeap{Nodes: make([]Node, 0, efSearch+mMax0+1)},
 			out:        make([]Node, 0, efSearch+1),
@@ -234,18 +231,52 @@ func (idx *Index) SetEfConst(ef int) {
 	idx.mu.Unlock()
 }
 
-// Search returns the top K nearest neighbors for the query vector.
-func (idx *Index) Search(query []float32, k int) []Node {
+func (idx *Index) Len() int {
 	idx.mu.RLock()
+	n := idx.nodeCount
+	idx.mu.RUnlock()
+	return int(n)
+}
+
+type Stats struct {
+	NodeCount  uint32
+	MaxLevel   int
+	EntryPoint uint32
+	M          int
+	MMax0      int
+	EfSearch   int
+	EfConst    int
+}
+
+func (idx *Index) Stats() Stats {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	return Stats{
+		NodeCount:  idx.nodeCount,
+		MaxLevel:   idx.maxLevel,
+		EntryPoint: idx.entryPoint,
+		M:          idx.m,
+		MMax0:      idx.mMax0,
+		EfSearch:   idx.efSearch,
+		EfConst:    idx.efConst,
+	}
+}
+
+// Search returns the top K nearest neighbors for the query vector.
+func (idx *Index) Search(query []float32, k int) ([]Node, error) {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	idx.storage.ReadLock()
+	defer idx.storage.ReadUnlock()
+
+	if idx.nodeCount == 0 {
+		return nil, nil
+	}
+
 	currMaxLevel := idx.maxLevel
 	currEntryPoint := idx.entryPoint
 	nodeCount := idx.nodeCount
 	efSearch := idx.efSearch
-	idx.mu.RUnlock()
-
-	if nodeCount == 0 {
-		return nil
-	}
 
 	currNode := currEntryPoint
 	currDist := idx.distFunc(query, idx.storage.GetVector(currNode))
@@ -313,7 +344,7 @@ func (idx *Index) Search(query []float32, k int) []Node {
 	actualK := min(k, len(buf.out))
 	res := make([]Node, actualK)
 	copy(res, buf.out[:actualK])
-	return res
+	return res, nil
 }
 
 // Insert adds a new vector to the index.
@@ -329,7 +360,6 @@ func (idx *Index) Insert(vec []float32) error {
 	idx.nodeCount = id + 1
 
 	if id == 0 {
-		// First node
 		idx.entryPoint = id
 		idx.maxLevel = level
 		idx.storage.writeUint32(24, id)
@@ -340,12 +370,12 @@ func (idx *Index) Insert(vec []float32) error {
 		return nil
 	}
 
-	idx.mu.RLock()
 	currEntryPoint := idx.entryPoint
 	currMaxLevel := idx.maxLevel
 	efConst := idx.efConst
-	idx.mu.RUnlock()
-	idx.mu.RLock() // Protects mmap from Grow() during traversal
+	idx.mu.Unlock()
+	idx.mu.RLock()
+	idx.storage.ReadLock()
 
 	// Initial greedy search to the insertion level
 	currNode := currEntryPoint
@@ -392,7 +422,8 @@ func (idx *Index) Insert(vec []float32) error {
 			newNbList = append(newNbList, id)
 
 			if len(newNbList) > limit {
-				newNbList = idx.shrinkNeighbors(newNbList, vec, limit)
+				nbVec := idx.storage.GetVector(nb)
+				newNbList = idx.shrinkNeighbors(newNbList, nbVec, limit)
 			}
 			idx.storage.SetNeighbors(nb, l, newNbList)
 			idx.storage.UnlockNode(nb)
@@ -400,6 +431,7 @@ func (idx *Index) Insert(vec []float32) error {
 	}
 
 	// Update global max level if needed
+	idx.storage.ReadUnlock()
 	idx.mu.RUnlock()
 	if level > currMaxLevel {
 		idx.mu.Lock()
@@ -424,13 +456,9 @@ func (idx *Index) randomLevel() int {
 }
 
 func (idx *Index) findNeighborsAtLayer(vec []float32, entry uint32, layer, ef int) []Node {
-	idx.mu.RLock()
-	nodeCount := idx.nodeCount
-	idx.mu.RUnlock()
-
 	buf := idx.pool.Get().(*searchBuffer)
 	defer idx.pool.Put(buf)
-	buf.reset(nodeCount)
+	buf.reset(idx.nodeCount)
 
 	dist := idx.distFunc(vec, idx.storage.GetVector(entry))
 	buf.candidates.Push(Node{ID: entry, Distance: dist})

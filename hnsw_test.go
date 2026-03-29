@@ -1,6 +1,7 @@
 package hnsw
 
 import (
+	"math/rand/v2"
 	"os"
 	"testing"
 )
@@ -12,7 +13,7 @@ func TestHNSW(t *testing.T) {
 	config := IndexConfig{
 		Dims:     128,
 		M:        16,
-		M_max0:   32,
+		MMax0:    32,
 		MaxLevel: 16,
 	}
 
@@ -22,31 +23,34 @@ func TestHNSW(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2, 16, 100, 100)
+	idx := NewIndex(storage, L2, 100, 100)
 
-	// Insert 100 random vectors
 	vectors := make([][]float32, 100)
 	for i := range vectors {
 		vectors[i] = make([]float32, 128)
 		for j := range vectors[i] {
-			vectors[i][j] = float32(i + j)
+			vectors[i][j] = rand.Float32()
 		}
 		if err := idx.Insert(vectors[i]); err != nil {
 			t.Fatalf("failed to insert vector %d: %v", i, err)
 		}
 	}
 
-	// Search for one of the vectors
-	query := vectors[50]
-	results := idx.Search(query, 5)
+	results, err := idx.Search(vectors[50], 5)
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
 
 	if len(results) == 0 {
 		t.Fatalf("expected results, got none")
 	}
 
-	// Closest result should be the vector itself (dist 0)
 	if results[0].ID != 50 {
-		t.Errorf("expected closest result to be ID 50, got %d", results[0].ID)
+		t.Errorf(
+			"expected closest result to be ID 50, got %d (dist=%f)",
+			results[0].ID,
+			results[0].Distance,
+		)
 	}
 	if results[0].Distance != 0 {
 		t.Errorf("expected distance 0, got %f", results[0].Distance)
@@ -60,7 +64,7 @@ func TestStorageGrow(t *testing.T) {
 	config := IndexConfig{
 		Dims:     4,
 		M:        4,
-		M_max0:   8,
+		MMax0:    8,
 		MaxLevel: 4,
 	}
 
