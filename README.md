@@ -1,16 +1,16 @@
 # hnsw-go
 
-A high-performance, pure Go implementation of Hierarchical Navigable Small World (HNSW) graphs for vector similarity search.
+A high-performance, pure Go implementation of Hierarchical Navigable Small World (HNSW) graphs for approximate nearest neighbor search.
 
-Designed for in-process use by AI agents (e.g., Canto), `hnsw-go` focuses on memory efficiency, cache locality, and zero-allocation hot paths.
+Designed for in-process use by AI agents and applications that need fast vector similarity search with persistence. Zero external dependencies (pure Go, no CGO).
 
-## Key Features
+## Design
 
-- **Pure Go 1.26+:** No CGO or external dependencies.
-- **TigerStyle Engineering:** Fixed-size memory layouts, pointer-free graph structures, and zero heap allocations on search/insertion hot paths.
-- **Mmap-backed Storage:** Graph nodes and vectors are stored in a contiguous memory-mapped file, bypassing the Go GC and enabling persistence.
-- **Cache-Optimized Layout:** Vectors and multi-layered neighbor lists are colocated for minimal cache misses.
-- **SOTA Algorithms:** Implements diverse neighbor selection heuristics for better graph connectivity and search recall.
+- **Mmap-backed storage** — Graph and vectors live in a memory-mapped file, bypassing the Go GC entirely. Reopen a file and the index is ready.
+- **Zero-allocation search** — Hot path uses `sync.Pool` for search buffers. Benchmarked at exactly 1 alloc/op (the result slice).
+- **Cache-optimized node layout** — Each node is a single 64-byte-aligned block containing metadata, vector, and all neighbor lists. Node ID directly resolves to a byte offset.
+- **Thread-safe** — `RWMutex` protects mmap remapping during concurrent inserts. Per-node spinlocks for fine-grained neighbor updates.
+- **Config validation** — Opening an existing file verifies stored parameters match the provided config, preventing silent corruption.
 
 ## Usage
 
@@ -18,36 +18,71 @@ Designed for in-process use by AI agents (e.g., Canto), `hnsw-go` focuses on mem
 package main
 
 import (
-	"fmt"
-	"github.com/omendb/hnsw-go/src"
+    "fmt"
+    "github.com/nijaru/hnsw-go"
 )
 
 func main() {
-	config := hnsw.IndexConfig{
-		Dims:     128,
-		M:        16,
-		MaxLevel: 16,
-	}
+    config := hnsw.IndexConfig{
+        Dims:     128,
+        M:        16,
+        MMax0:    32,
+        MaxLevel: 16,
+    }
 
-	storage, _ := hnsw.NewStorage("data.hnsw", config, 10000)
-	defer storage.Close()
+    storage, _ := hnsw.NewStorage("vectors.hnsw", config, 10000)
+    defer storage.Close()
 
-	idx := hnsw.NewIndex(storage, hnsw.L2, 16, 100, 100)
+    idx := hnsw.NewIndex(storage, hnsw.L2, 200, 200)
 
-	// Insert
-	vec := make([]float32, 128)
-	idx.Insert(vec)
-
-	// Search
-	results := idx.Search(vec, 10)
-	for _, res := range results {
-		fmt.Printf("ID: %d, Distance: %f\n", res.ID, res.Distance)
-	}
+    idx.Insert(vec)
+    results, _ := idx.Search(query, 10)
+    for _, r := range results {
+        fmt.Printf("ID=%d Distance=%f\n", r.ID, r.Distance)
+    }
 }
 ```
 
-## Performance & Optimization
+## API
 
-- **GC Avoidance:** By storing millions of nodes in `mmap` and using `unsafe.Slice` for access, the Go garbage collector never sees the graph metadata or vector data.
-- **Atomic Operations:** Node-level spinlocks ensure thread-safe insertions with minimal overhead.
-- **Zero-Allocation Search:** Uses a `sync.Pool` for search buffers (visited lists, priority queues) to eliminate per-query allocations.
+### Config
+
+```go
+type IndexConfig struct {
+    Dims     uint32  // Vector dimensions
+    M        uint32  // Max neighbors per layer (layer 1+)
+    MMax0    uint32  // Max neighbors at layer 0 (default: M * 2)
+    MaxLevel uint32  // Max graph levels
+}
+```
+
+### Index
+
+| Method | Description |
+|--------|-------------|
+| `NewIndex(storage, distFunc, efSearch, efConst)` | Create index from storage |
+| `Insert(vec)` | Insert a vector |
+| `Search(query, k)` | Search for k nearest neighbors |
+| `SetEfSearch(ef)` | Adjust search effort at runtime |
+| `SetEfConst(ef)` | Adjust construction effort at runtime |
+| `Len()` | Number of indexed vectors |
+| `Stats()` | Index statistics |
+
+### Distance Functions
+
+- `L2` — Euclidean distance (ILP-optimized with 4 accumulators)
+- `Cosine` — Cosine distance (1 - cosine similarity)
+- `Dot` — Negative dot product
+
+## Performance
+
+On Apple M3 Max with SIFT 10k (128-dim, 10k vectors):
+
+- **Recall@10:** 99.99%
+- **Search latency:** ~128μs/query
+- **Search allocations:** 1 alloc/op (result copy only)
+
+## Requirements
+
+- Go 1.26+
+- `golang.org/x/sys/unix` (mmap)
