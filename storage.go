@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"sync"
 	"sync/atomic"
 	"unsafe"
 
@@ -31,7 +32,7 @@ const (
 type IndexConfig struct {
 	Dims     uint32
 	M        uint32
-	M_max0   uint32
+	MMax0    uint32
 	MaxLevel uint32
 }
 
@@ -49,7 +50,7 @@ type NodeLayout struct {
 }
 
 func NewNodeLayout(config IndexConfig) NodeLayout {
-	mMax0 := config.M_max0
+	mMax0 := config.MMax0
 	if mMax0 == 0 {
 		mMax0 = config.M * 2
 	}
@@ -90,6 +91,7 @@ type Storage struct {
 	data   []byte
 	config IndexConfig
 	layout NodeLayout
+	mu     sync.RWMutex
 }
 
 // NewStorage opens or creates an HNSW storage file.
@@ -136,9 +138,14 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 		layout: layout,
 	}
 
-	// Initialize header if new file
 	if info.Size() == 0 || s.readUint32(0) == 0 {
 		s.writeHeader()
+	} else {
+		if err := s.validateHeader(); err != nil {
+			unix.Munmap(data)
+			file.Close()
+			return nil, err
+		}
 	}
 
 	return s, nil
@@ -146,13 +153,37 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 
 func (s *Storage) writeHeader() {
 	copy(s.data[0:4], Magic)
-	s.writeUint32(4, 1) // Version
+	s.writeUint32(4, 1)
 	s.writeUint32(8, s.config.Dims)
 	s.writeUint32(12, s.config.M)
-	s.writeUint32(16, s.config.M_max0)
+	s.writeUint32(16, s.config.MMax0)
 	s.writeUint32(20, s.config.MaxLevel)
-	// EntryPoint (24), NodeCount (28), AllocatedNodes (32) are 0 by default
 	s.writeUint32(32, (uint32(len(s.data))-HeaderSize)/s.layout.NodeSize)
+}
+
+func (s *Storage) validateHeader() error {
+	magic := string(s.data[0:4])
+	if magic != Magic {
+		return fmt.Errorf("invalid hnsw file: bad magic %q", magic)
+	}
+	if s.readUint32(4) != 1 {
+		return fmt.Errorf("unsupported hnsw version: %d", s.readUint32(4))
+	}
+	if s.readUint32(8) != s.config.Dims {
+		return fmt.Errorf(
+			"dims mismatch: file has %d, config has %d",
+			s.readUint32(8),
+			s.config.Dims,
+		)
+	}
+	if s.readUint32(12) != s.config.M {
+		return fmt.Errorf("M mismatch: file has %d, config has %d", s.readUint32(12), s.config.M)
+	}
+	fileMMax0 := s.readUint32(16)
+	if fileMMax0 != s.config.MMax0 && !(fileMMax0 == 0 && s.config.MMax0 == s.config.M*2) {
+		return fmt.Errorf("MMax0 mismatch: file has %d, config has %d", fileMMax0, s.config.MMax0)
+	}
+	return nil
 }
 
 func (s *Storage) readUint32(offset uint32) uint32 {
@@ -167,6 +198,14 @@ func (s *Storage) writeUint32(offset uint32, val uint32) {
 func (s *Storage) GetNodeData(id uint32) []byte {
 	offset := HeaderSize + (id * s.layout.NodeSize)
 	return s.data[offset : offset+s.layout.NodeSize]
+}
+
+func (s *Storage) ReadLock() {
+	s.mu.RLock()
+}
+
+func (s *Storage) ReadUnlock() {
+	s.mu.RUnlock()
 }
 
 // GetVector returns a float32 slice pointing to the node's vector.
@@ -186,7 +225,7 @@ func (s *Storage) GetNeighbors(id uint32, layer int) []uint32 {
 		count = int(
 			binary.LittleEndian.Uint32(data[s.layout.L0CountOffset : s.layout.L0CountOffset+4]),
 		)
-		neighborsData = data[s.layout.L0NeighborsOffset : s.layout.L0NeighborsOffset+(s.config.M_max0*4)]
+		neighborsData = data[s.layout.L0NeighborsOffset : s.layout.L0NeighborsOffset+(s.config.MMax0*4)]
 	} else {
 		countsOffset := s.layout.UpperCountsOffset + uint32(layer-1)*4
 		count = int(binary.LittleEndian.Uint32(data[countsOffset : countsOffset+4]))
@@ -205,8 +244,8 @@ func (s *Storage) SetNeighbors(id uint32, layer int, neighbors []uint32) {
 			data[s.layout.L0CountOffset:s.layout.L0CountOffset+4],
 			uint32(len(neighbors)),
 		)
-		neighborsData := data[s.layout.L0NeighborsOffset : s.layout.L0NeighborsOffset+(s.config.M_max0*4)]
-		copy(unsafe.Slice((*uint32)(unsafe.Pointer(&neighborsData[0])), s.config.M_max0), neighbors)
+		neighborsData := data[s.layout.L0NeighborsOffset : s.layout.L0NeighborsOffset+(s.config.MMax0*4)]
+		copy(unsafe.Slice((*uint32)(unsafe.Pointer(&neighborsData[0])), s.config.MMax0), neighbors)
 	} else {
 		countsOffset := s.layout.UpperCountsOffset + uint32(layer-1)*4
 		binary.LittleEndian.PutUint32(data[countsOffset:countsOffset+4], uint32(len(neighbors)))
@@ -256,19 +295,19 @@ func (s *Storage) AddNode() (uint32, error) {
 
 // Grow increases the capacity of the mmap file to accommodate more nodes.
 func (s *Storage) Grow(newAllocated uint32) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	newSize := HeaderSize + (newAllocated * s.layout.NodeSize)
 
-	// Unmap
 	if err := unix.Munmap(s.data); err != nil {
 		return fmt.Errorf("munmap: %w", err)
 	}
 
-	// Truncate
 	if err := s.file.Truncate(int64(newSize)); err != nil {
 		return fmt.Errorf("truncate: %w", err)
 	}
 
-	// Remap
 	data, err := unix.Mmap(
 		int(s.file.Fd()),
 		0,
