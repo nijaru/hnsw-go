@@ -1,6 +1,7 @@
 package hnsw
 
 import (
+	"fmt"
 	"math/rand/v2"
 	"os"
 	"testing"
@@ -19,7 +20,7 @@ func BenchmarkHNSWBuild(b *testing.B) {
 
 	storage, err := NewStorage(path, config, uint32(b.N))
 	if err != nil {
-		b.Fatalf("failed to create storage: %v", err)
+		b.Fatal(err)
 	}
 	defer storage.Close()
 
@@ -32,13 +33,13 @@ func BenchmarkHNSWBuild(b *testing.B) {
 
 	for b.Loop() {
 		if err := idx.Insert(vec); err != nil {
-			b.Fatalf("failed to insert: %v", err)
+			b.Fatal(err)
 		}
 	}
 }
 
 func BenchmarkHNSWSearch(b *testing.B) {
-	path := "bench_search.hnsw"
+	path := fmt.Sprintf("bench_search_%d.hnsw", rand.Int64())
 	defer os.Remove(path)
 
 	config := IndexConfig{
@@ -51,7 +52,7 @@ func BenchmarkHNSWSearch(b *testing.B) {
 	numNodes := 10000
 	storage, err := NewStorage(path, config, uint32(numNodes))
 	if err != nil {
-		b.Fatalf("failed to create storage: %v", err)
+		b.Fatal(err)
 	}
 	defer storage.Close()
 

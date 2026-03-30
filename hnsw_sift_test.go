@@ -6,10 +6,11 @@ import (
 	"math"
 	"math/rand/v2"
 	"os"
+	"slices"
 	"testing"
 )
 
-func loadSIFT10kBinary(t *testing.T) (vectors, queries [][]float32, groundTruth [][]int32) {
+func loadSIFT10kBinary(t testing.TB) (vectors, queries [][]float32, groundTruth [][]int32) {
 	t.Helper()
 	path := "sift10k_test.bin"
 	if _, err := os.Stat(path); os.IsNotExist(err) {
@@ -139,6 +140,182 @@ func TestSIFT10kRecall(t *testing.T) {
 	if avgRecall < 0.80 {
 		t.Errorf("recall %.4f below threshold 0.80", avgRecall)
 	}
+}
+
+func TestSIFT10kGroundTruthVerify(t *testing.T) {
+	vectors, queries, groundTruth := loadSIFT10kBinary(t)
+
+	// Verify ground truth for ALL queries by brute-force
+	// using our exact L2 function (squared Euclidean).
+	k := 10
+	mismatches := 0
+	for qi := 0; qi < len(queries); qi++ {
+		query := queries[qi]
+
+		type idDist struct {
+			id   uint32
+			dist float32
+		}
+		all := make([]idDist, len(vectors))
+		for i, vec := range vectors {
+			all[i] = idDist{id: uint32(i), dist: L2(query, vec)}
+		}
+		slices.SortFunc(all, func(a, b idDist) int {
+			if a.dist < b.dist {
+				return -1
+			}
+			if a.dist > b.dist {
+				return 1
+			}
+			return 0
+		})
+
+		for j := 0; j < k; j++ {
+			gtID := uint32(groundTruth[qi][j])
+			bfID := all[j].id
+			if gtID != bfID {
+				gtDist := L2(query, vectors[gtID])
+				bfDist := all[j].dist
+				if gtDist != bfDist {
+					mismatches++
+					t.Errorf("q=%d rank=%d: ground truth says id=%d (dist=%.6f) but brute force says id=%d (dist=%.6f)",
+						qi, j, gtID, gtDist, bfID, bfDist)
+					if mismatches >= 10 {
+						t.Fatalf("too many mismatches, stopping")
+					}
+				}
+			}
+		}
+	}
+	if mismatches == 0 {
+		t.Logf("Ground truth verified against brute force: all %d queries, top-%d each", len(queries), k)
+	}
+}
+
+func TestSIFT10kRecallDistribution(t *testing.T) {
+	vectors, queries, groundTruth := loadSIFT10kBinary(t)
+
+	path := fmt.Sprintf("sift10k_dist_%d.hnsw", rand.Int64())
+	defer os.Remove(path)
+
+	config := IndexConfig{
+		Dims:     128,
+		M:        16,
+		MMax0:    32,
+		MaxLevel: 16,
+	}
+
+	storage, err := NewStorage(path, config, uint32(len(vectors)))
+	if err != nil {
+		t.Fatalf("create storage: %v", err)
+	}
+	defer storage.Close()
+
+	idx := NewIndex(storage, L2, 200, 200)
+	for i, vec := range vectors {
+		if err := idx.Insert(vec); err != nil {
+			t.Fatalf("insert %d: %v", i, err)
+		}
+	}
+
+	k := 10
+	perfectCount := 0
+	missCount := 0
+	missedQueries := []string{}
+
+	for qi, query := range queries {
+		results, err := idx.Search(query, k)
+		if err != nil {
+			t.Fatalf("search %d: %v", qi, err)
+		}
+
+		recall := recallAtK(results, groundTruth[qi], k)
+		if recall == 1.0 {
+			perfectCount++
+		} else {
+			missCount++
+			hits := int(recall * float64(k))
+			missedQueries = append(missedQueries, fmt.Sprintf("  q=%d: recall=%.2f (%d/%d)", qi, recall, hits, k))
+		}
+	}
+
+	t.Logf("Recall distribution: %d perfect (%.1f%%), %d imperfect (%.1f%%)",
+		perfectCount, float64(perfectCount)/float64(len(queries))*100,
+		missCount, float64(missCount)/float64(len(queries))*100)
+
+	for _, m := range missedQueries {
+		t.Log(m)
+	}
+}
+
+func TestSIFT10kSearchVsBruteForce(t *testing.T) {
+	vectors, queries, _ := loadSIFT10kBinary(t)
+
+	path := fmt.Sprintf("sift10k_bf_%d.hnsw", rand.Int64())
+	defer os.Remove(path)
+
+	config := IndexConfig{
+		Dims:     128,
+		M:        16,
+		MMax0:    32,
+		MaxLevel: 16,
+	}
+
+	storage, err := NewStorage(path, config, uint32(len(vectors)))
+	if err != nil {
+		t.Fatalf("create storage: %v", err)
+	}
+	defer storage.Close()
+
+	idx := NewIndex(storage, L2, 200, 200)
+	for i, vec := range vectors {
+		if err := idx.Insert(vec); err != nil {
+			t.Fatalf("insert %d: %v", i, err)
+		}
+	}
+
+	k := 10
+	for qi := 0; qi < 50; qi++ {
+		query := queries[qi]
+
+		results, err := idx.Search(query, k)
+		if err != nil {
+			t.Fatalf("search %d: %v", qi, err)
+		}
+
+		// Brute force
+		type idDist struct {
+			id   uint32
+			dist float32
+		}
+		all := make([]idDist, len(vectors))
+		for i, vec := range vectors {
+			all[i] = idDist{id: uint32(i), dist: L2(query, vec)}
+		}
+		slices.SortFunc(all, func(a, b idDist) int {
+			if a.dist < b.dist {
+				return -1
+			}
+			if a.dist > b.dist {
+				return 1
+			}
+			return 0
+		})
+
+		for j := 0; j < k; j++ {
+			hnswID := results[j].ID
+			bfID := all[j].id
+			if hnswID != bfID {
+				hnswDist := L2(query, vectors[hnswID])
+				bfDist := all[j].dist
+				if hnswDist != bfDist {
+					t.Errorf("q=%d rank=%d: HNSW says id=%d (dist=%.6f) but brute force says id=%d (dist=%.6f)",
+						qi, j, hnswID, hnswDist, bfID, bfDist)
+				}
+			}
+		}
+	}
+	t.Log("HNSW search matches brute force for first 50 queries")
 }
 
 func TestSIFT10kPersistence(t *testing.T) {
