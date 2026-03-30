@@ -11,8 +11,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Close unmaps the data and closes the file.
 func (s *Storage) Close() error {
+	if err := unix.Msync(s.data, unix.MS_SYNC); err != nil {
+		s.file.Close()
+		return err
+	}
 	if err := unix.Munmap(s.data); err != nil {
 		s.file.Close()
 		return err
@@ -21,14 +24,10 @@ func (s *Storage) Close() error {
 }
 
 const (
-	// HeaderSize is the size of the global metadata at the start of the file.
-	// Padded to 64 bytes.
 	HeaderSize = 64
-
-	Magic = "HNSW"
+	Magic      = "HNSW"
 )
 
-// IndexConfig holds the static configuration for the HNSW index.
 type IndexConfig struct {
 	Dims     uint32
 	M        uint32
@@ -36,10 +35,8 @@ type IndexConfig struct {
 	MaxLevel uint32
 }
 
-// NodeLayout defines the byte offsets for fields within a single node block.
 type NodeLayout struct {
-	NodeSize uint32
-
+	NodeSize             uint32
 	LockOffset           uint32
 	LevelOffset          uint32
 	L0CountOffset        uint32
@@ -59,33 +56,31 @@ func NewNodeLayout(config IndexConfig) NodeLayout {
 	offset := uint32(0)
 
 	layout.LockOffset = offset
-	offset += 4 // uint32
+	offset += 4
 
 	layout.LevelOffset = offset
-	offset += 4 // int32
+	offset += 4
 
 	layout.L0CountOffset = offset
-	offset += 4 // int32
+	offset += 4
 
 	layout.UpperCountsOffset = offset
-	offset += config.MaxLevel * 4 // [MaxLevel]int32
+	offset += config.MaxLevel * 4
 
 	layout.VectorOffset = offset
-	offset += config.Dims * 4 // [Dims]float32
+	offset += config.Dims * 4
 
 	layout.L0NeighborsOffset = offset
-	offset += mMax0 * 4 // [M_max0]uint32
+	offset += mMax0 * 4
 
 	layout.UpperNeighborsOffset = offset
-	offset += config.MaxLevel * config.M * 4 // [MaxLevel][M]uint32
+	offset += config.MaxLevel * config.M * 4
 
-	// Align to 64 bytes
 	layout.NodeSize = (offset + 63) &^ 63
 
 	return layout
 }
 
-// Storage represents the mmap'd file storage for the HNSW index.
 type Storage struct {
 	file   *os.File
 	data   []byte
@@ -94,10 +89,23 @@ type Storage struct {
 	mu     sync.RWMutex
 }
 
-// NewStorage opens or creates an HNSW storage file.
 func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage, error) {
+	if config.Dims == 0 {
+		return nil, fmt.Errorf("hnsw: Dims must be > 0")
+	}
+	if config.M == 0 {
+		return nil, fmt.Errorf("hnsw: M must be > 0")
+	}
+	if config.MaxLevel == 0 {
+		return nil, fmt.Errorf("hnsw: MaxLevel must be > 0")
+	}
+
+	if config.MMax0 == 0 {
+		config.MMax0 = config.M * 2
+	}
+
 	layout := NewNodeLayout(config)
-	totalSize := HeaderSize + (initialNodes * layout.NodeSize)
+	totalSize := uint64(HeaderSize) + uint64(initialNodes)*uint64(layout.NodeSize)
 
 	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o666)
 	if err != nil {
@@ -110,19 +118,21 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 		return nil, err
 	}
 
+	var mmapSize int
 	if info.Size() < int64(totalSize) {
 		if err := file.Truncate(int64(totalSize)); err != nil {
 			file.Close()
 			return nil, err
 		}
+		mmapSize = int(totalSize)
 	} else {
-		totalSize = uint32(info.Size())
+		mmapSize = int(info.Size())
 	}
 
 	data, err := unix.Mmap(
 		int(file.Fd()),
 		0,
-		int(totalSize),
+		mmapSize,
 		unix.PROT_READ|unix.PROT_WRITE,
 		unix.MAP_SHARED,
 	)
@@ -158,6 +168,7 @@ func (s *Storage) writeHeader() {
 	s.writeUint32(12, s.config.M)
 	s.writeUint32(16, s.config.MMax0)
 	s.writeUint32(20, s.config.MaxLevel)
+	s.writeUint32(36, 0)
 	s.writeUint32(32, (uint32(len(s.data))-HeaderSize)/s.layout.NodeSize)
 }
 
@@ -179,9 +190,11 @@ func (s *Storage) validateHeader() error {
 	if s.readUint32(12) != s.config.M {
 		return fmt.Errorf("M mismatch: file has %d, config has %d", s.readUint32(12), s.config.M)
 	}
-	fileMMax0 := s.readUint32(16)
-	if fileMMax0 != s.config.MMax0 && !(fileMMax0 == 0 && s.config.MMax0 == s.config.M*2) {
-		return fmt.Errorf("MMax0 mismatch: file has %d, config has %d", fileMMax0, s.config.MMax0)
+	if s.readUint32(16) != s.config.MMax0 {
+		return fmt.Errorf("MMax0 mismatch: file has %d, config has %d", s.readUint32(16), s.config.MMax0)
+	}
+	if s.readUint32(20) != s.config.MaxLevel {
+		return fmt.Errorf("MaxLevel mismatch: file has %d, config has %d", s.readUint32(20), s.config.MaxLevel)
 	}
 	return nil
 }
@@ -194,10 +207,13 @@ func (s *Storage) writeUint32(offset uint32, val uint32) {
 	binary.LittleEndian.PutUint32(s.data[offset:offset+4], val)
 }
 
-// GetNodeData returns the raw byte slice for a node.
-func (s *Storage) GetNodeData(id uint32) []byte {
-	offset := HeaderSize + (id * s.layout.NodeSize)
-	return s.data[offset : offset+s.layout.NodeSize]
+func (s *Storage) getNodeData(id uint32) []byte {
+	offset := uint64(HeaderSize) + uint64(id)*uint64(s.layout.NodeSize)
+	end := offset + uint64(s.layout.NodeSize)
+	if end > uint64(len(s.data)) {
+		panic("hnsw: node id out of bounds")
+	}
+	return s.data[offset:end]
 }
 
 func (s *Storage) ReadLock() {
@@ -208,16 +224,14 @@ func (s *Storage) ReadUnlock() {
 	s.mu.RUnlock()
 }
 
-// GetVector returns a float32 slice pointing to the node's vector.
 func (s *Storage) GetVector(id uint32) []float32 {
-	data := s.GetNodeData(id)
+	data := s.getNodeData(id)
 	vecData := data[s.layout.VectorOffset : s.layout.VectorOffset+(s.config.Dims*4)]
 	return unsafe.Slice((*float32)(unsafe.Pointer(&vecData[0])), s.config.Dims)
 }
 
-// GetNeighbors returns a uint32 slice pointing to the node's neighbors at a layer.
 func (s *Storage) GetNeighbors(id uint32, layer int) []uint32 {
-	data := s.GetNodeData(id)
+	data := s.getNodeData(id)
 	var neighborsData []byte
 	var count int
 
@@ -227,6 +241,9 @@ func (s *Storage) GetNeighbors(id uint32, layer int) []uint32 {
 		)
 		neighborsData = data[s.layout.L0NeighborsOffset : s.layout.L0NeighborsOffset+(s.config.MMax0*4)]
 	} else {
+		if layer > int(s.config.MaxLevel) {
+			panic("hnsw: layer out of bounds")
+		}
 		countsOffset := s.layout.UpperCountsOffset + uint32(layer-1)*4
 		count = int(binary.LittleEndian.Uint32(data[countsOffset : countsOffset+4]))
 		layerOffset := s.layout.UpperNeighborsOffset + uint32(layer-1)*s.config.M*4
@@ -236,9 +253,8 @@ func (s *Storage) GetNeighbors(id uint32, layer int) []uint32 {
 	return unsafe.Slice((*uint32)(unsafe.Pointer(&neighborsData[0])), count)
 }
 
-// SetNeighbors updates the neighbor list for a node at a given layer.
 func (s *Storage) SetNeighbors(id uint32, layer int, neighbors []uint32) {
-	data := s.GetNodeData(id)
+	data := s.getNodeData(id)
 	if layer == 0 {
 		binary.LittleEndian.PutUint32(
 			data[s.layout.L0CountOffset:s.layout.L0CountOffset+4],
@@ -247,6 +263,9 @@ func (s *Storage) SetNeighbors(id uint32, layer int, neighbors []uint32) {
 		neighborsData := data[s.layout.L0NeighborsOffset : s.layout.L0NeighborsOffset+(s.config.MMax0*4)]
 		copy(unsafe.Slice((*uint32)(unsafe.Pointer(&neighborsData[0])), s.config.MMax0), neighbors)
 	} else {
+		if layer > int(s.config.MaxLevel) {
+			panic("hnsw: layer out of bounds")
+		}
 		countsOffset := s.layout.UpperCountsOffset + uint32(layer-1)*4
 		binary.LittleEndian.PutUint32(data[countsOffset:countsOffset+4], uint32(len(neighbors)))
 		layerOffset := s.layout.UpperNeighborsOffset + uint32(layer-1)*s.config.M*4
@@ -255,35 +274,29 @@ func (s *Storage) SetNeighbors(id uint32, layer int, neighbors []uint32) {
 	}
 }
 
-// LockNode acquires a spinlock on the node.
-// Note: Offset is guaranteed to be 4-byte aligned due to 64-byte node padding.
 func (s *Storage) LockNode(id uint32) {
-	data := s.GetNodeData(id)
+	data := s.getNodeData(id)
 	lockPtr := (*uint32)(unsafe.Pointer(&data[s.layout.LockOffset]))
 	for !atomic.CompareAndSwapUint32(lockPtr, 0, 1) {
-		// spin
 	}
 }
 
-// UnlockNode releases the spinlock on the node.
 func (s *Storage) UnlockNode(id uint32) {
-	data := s.GetNodeData(id)
+	data := s.getNodeData(id)
 	lockPtr := (*uint32)(unsafe.Pointer(&data[s.layout.LockOffset]))
 	atomic.StoreUint32(lockPtr, 0)
 }
 
-// AddNode allocates a new node ID and grows the storage if necessary.
-func (s *Storage) AddNode() (uint32, error) {
+func (s *Storage) addNode() (uint32, error) {
 	nodeCount := s.readUint32(28)
 	allocated := s.readUint32(32)
 
 	if nodeCount >= allocated {
-		// Grow by 2x or at least 1000 nodes
 		newAllocated := allocated * 2
 		if newAllocated == 0 {
 			newAllocated = 1000
 		}
-		if err := s.Grow(newAllocated); err != nil {
+		if err := s.grow(newAllocated); err != nil {
 			return 0, err
 		}
 	}
@@ -293,16 +306,11 @@ func (s *Storage) AddNode() (uint32, error) {
 	return id, nil
 }
 
-// Grow increases the capacity of the mmap file to accommodate more nodes.
-func (s *Storage) Grow(newAllocated uint32) error {
+func (s *Storage) grow(newAllocated uint32) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	newSize := HeaderSize + (newAllocated * s.layout.NodeSize)
-
-	if err := unix.Munmap(s.data); err != nil {
-		return fmt.Errorf("munmap: %w", err)
-	}
+	newSize := uint64(HeaderSize) + uint64(newAllocated)*uint64(s.layout.NodeSize)
 
 	if err := s.file.Truncate(int64(newSize)); err != nil {
 		return fmt.Errorf("truncate: %w", err)
@@ -319,7 +327,24 @@ func (s *Storage) Grow(newAllocated uint32) error {
 		return fmt.Errorf("mmap: %w", err)
 	}
 
+	oldData := s.data
 	s.data = data
 	s.writeUint32(32, newAllocated)
+
+	if oldData != nil {
+		unix.Munmap(oldData)
+	}
+
 	return nil
+}
+
+func (s *Storage) setLevel(id uint32, level int) {
+	data := s.getNodeData(id)
+	binary.LittleEndian.PutUint32(data[s.layout.LevelOffset:s.layout.LevelOffset+4], uint32(level))
+}
+
+func (s *Storage) setVector(id uint32, vec []float32) {
+	data := s.getNodeData(id)
+	vecData := data[s.layout.VectorOffset : s.layout.VectorOffset+(s.config.Dims*4)]
+	copy(unsafe.Slice((*float32)(unsafe.Pointer(&vecData[0])), s.config.Dims), vec)
 }

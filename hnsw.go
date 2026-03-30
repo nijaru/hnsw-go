@@ -1,48 +1,24 @@
 package hnsw
 
 import (
-	"encoding/binary"
+	"fmt"
+	"math"
 	"math/rand/v2"
 	"slices"
 	"sync"
-	"unsafe"
 )
 
-/*
-Safety & Performance Mandate (TigerStyle):
-
-1. Zero-Allocation (GC Immunity):
-   The Search and findNeighborsAtLayer paths must maintain 0-1 heap allocations.
-   All search-related structures (visited lists, priority queues) are reused
-   from a sync.Pool.
-
-2. Zero-Copy (Mechanical Sympathy):
-   All graph traversal occurs via unsafe.Slice views of the mmap'd backing slice.
-   This avoids redundant heap allocations and expensive memcpy operations.
-
-3. Pointers & Remapping:
-   The Index.mu RWMutex MUST be held for the duration of any traversal to ensure
-   active mmap slices (s.data) are not unmapped/remapped by a concurrent Grow().
-
-4. Alignment:
-   All node offsets are aligned to 64-byte boundaries (HeaderSize + NodeID * NodeSize).
-   This ensures node metadata and the first few vector elements fit in a single cache line.
-*/
-
-// Node represents a point in the HNSW graph.
 type Node struct {
 	ID       uint32
 	Distance float32
 }
 
-// NodeHeap is a min-heap of nodes (closest first).
-type NodeHeap struct {
+type nodeHeap struct {
 	Nodes []Node
 }
 
-func (h *NodeHeap) Push(n Node) {
+func (h *nodeHeap) Push(n Node) {
 	h.Nodes = append(h.Nodes, n)
-	// sift up
 	i := len(h.Nodes) - 1
 	for i > 0 {
 		p := (i - 1) / 2
@@ -54,12 +30,11 @@ func (h *NodeHeap) Push(n Node) {
 	}
 }
 
-func (h *NodeHeap) Pop() Node {
+func (h *nodeHeap) Pop() Node {
 	n := h.Nodes[0]
 	last := len(h.Nodes) - 1
 	h.Nodes[0] = h.Nodes[last]
 	h.Nodes = h.Nodes[:last]
-	// sift down
 	i := 0
 	for {
 		l := 2*i + 1
@@ -80,12 +55,11 @@ func (h *NodeHeap) Pop() Node {
 	return n
 }
 
-// MaxNodeHeap is a max-heap of nodes (furthest first).
-type MaxNodeHeap struct {
+type maxNodeHeap struct {
 	Nodes []Node
 }
 
-func (h *MaxNodeHeap) Push(n Node) {
+func (h *maxNodeHeap) Push(n Node) {
 	h.Nodes = append(h.Nodes, n)
 	i := len(h.Nodes) - 1
 	for i > 0 {
@@ -98,7 +72,7 @@ func (h *MaxNodeHeap) Push(n Node) {
 	}
 }
 
-func (h *MaxNodeHeap) Pop() Node {
+func (h *maxNodeHeap) Pop() Node {
 	n := h.Nodes[0]
 	last := len(h.Nodes) - 1
 	h.Nodes[0] = h.Nodes[last]
@@ -124,11 +98,11 @@ func (h *MaxNodeHeap) Pop() Node {
 }
 
 type searchBuffer struct {
-	visited    []uint32 // generation-based bitset or dense array
-	results    MaxNodeHeap
-	candidates NodeHeap
-	out        []Node // reusable output buffer
-	gen        uint32
+	visited    []uint8
+	results    maxNodeHeap
+	candidates nodeHeap
+	out        []Node
+	gen        uint8
 }
 
 func (b *searchBuffer) isVisited(id uint32) bool {
@@ -147,14 +121,14 @@ func (b *searchBuffer) visit(id uint32) {
 
 func (b *searchBuffer) reset(maxNodes uint32) {
 	b.gen++
-	if b.gen == 0 { // overflow
+	if b.gen == 0 {
 		for i := range b.visited {
 			b.visited[i] = 0
 		}
 		b.gen = 1
 	}
 	if uint32(len(b.visited)) < maxNodes {
-		b.visited = make([]uint32, maxNodes+2048)
+		b.visited = make([]uint8, maxNodes+2048)
 		b.gen = 1
 	}
 	b.results.Nodes = b.results.Nodes[:0]
@@ -162,7 +136,6 @@ func (b *searchBuffer) reset(maxNodes uint32) {
 	b.out = b.out[:0]
 }
 
-// Index represents the HNSW index.
 type Index struct {
 	storage    *Storage
 	distFunc   DistanceFunc
@@ -170,23 +143,21 @@ type Index struct {
 	entryPoint uint32
 	maxLevel   int
 	nodeCount  uint32
-
-	// Config
-	m        int
-	mMax0    int
-	efSearch int
-	efConst  int
-
-	// Pool for zero-allocation search buffers
-	pool sync.Pool
+	m          int
+	mMax0      int
+	efSearch   int
+	efConst    int
+	pool       sync.Pool
 }
 
-// NewIndex creates a new HNSW index.
 func NewIndex(storage *Storage, distFunc DistanceFunc, efSearch, efConst int) *Index {
 	m := int(storage.config.M)
 	mMax0 := int(storage.config.MMax0)
-	if mMax0 == 0 {
-		mMax0 = m * 2
+	if efSearch <= 0 {
+		efSearch = 16
+	}
+	if efConst <= 0 {
+		efConst = 200
 	}
 	idx := &Index{
 		storage:    storage,
@@ -201,30 +172,27 @@ func NewIndex(storage *Storage, distFunc DistanceFunc, efSearch, efConst int) *I
 
 	idx.pool.New = func() any {
 		return &searchBuffer{
-			visited:    make([]uint32, 16384),
-			results:    MaxNodeHeap{Nodes: make([]Node, 0, efSearch+mMax0+1)},
-			candidates: NodeHeap{Nodes: make([]Node, 0, efSearch+mMax0+1)},
+			visited:    make([]uint8, 16384),
+			results:    maxNodeHeap{Nodes: make([]Node, 0, efSearch+mMax0+1)},
+			candidates: nodeHeap{Nodes: make([]Node, 0, efSearch+mMax0+1)},
 			out:        make([]Node, 0, efSearch+1),
 			gen:        1,
 		}
 	}
 
-	// Load global state from storage header
-	idx.maxLevel = int(storage.readUint32(20))
+	idx.maxLevel = int(storage.readUint32(36))
 	idx.entryPoint = storage.readUint32(24)
 	idx.nodeCount = storage.readUint32(28)
 
 	return idx
 }
 
-// SetEfSearch updates the search effort parameter.
 func (idx *Index) SetEfSearch(ef int) {
 	idx.mu.Lock()
 	idx.efSearch = ef
 	idx.mu.Unlock()
 }
 
-// SetEfConst updates the construction effort parameter.
 func (idx *Index) SetEfConst(ef int) {
 	idx.mu.Lock()
 	idx.efConst = ef
@@ -262,8 +230,14 @@ func (idx *Index) Stats() Stats {
 	}
 }
 
-// Search returns the top K nearest neighbors for the query vector.
 func (idx *Index) Search(query []float32, k int) ([]Node, error) {
+	if len(query) != int(idx.storage.config.Dims) {
+		return nil, fmt.Errorf("hnsw: query dims %d != index dims %d", len(query), idx.storage.config.Dims)
+	}
+	if k <= 0 {
+		return nil, nil
+	}
+
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 	idx.storage.ReadLock()
@@ -281,7 +255,6 @@ func (idx *Index) Search(query []float32, k int) ([]Node, error) {
 	currNode := currEntryPoint
 	currDist := idx.distFunc(query, idx.storage.GetVector(currNode))
 
-	// 1. Greedy search through upper layers
 	for level := currMaxLevel; level >= 1; level-- {
 		changed := true
 		for changed {
@@ -298,7 +271,6 @@ func (idx *Index) Search(query []float32, k int) ([]Node, error) {
 		}
 	}
 
-	// 2. Search at layer 0 with efSearch
 	buf := idx.pool.Get().(*searchBuffer)
 	defer idx.pool.Put(buf)
 	buf.reset(nodeCount)
@@ -309,7 +281,7 @@ func (idx *Index) Search(query []float32, k int) ([]Node, error) {
 
 	for len(buf.candidates.Nodes) > 0 {
 		c := buf.candidates.Pop()
-		f := buf.results.Nodes[0] // furthest in results
+		f := buf.results.Nodes[0]
 
 		if c.Distance > f.Distance && len(buf.results.Nodes) >= efSearch {
 			break
@@ -334,11 +306,9 @@ func (idx *Index) Search(query []float32, k int) ([]Node, error) {
 		}
 	}
 
-	// Return top K
 	for len(buf.results.Nodes) > 0 {
 		buf.out = append(buf.out, buf.results.Pop())
 	}
-	// Reverse to get closest first
 	slices.Reverse(buf.out)
 
 	actualK := min(k, len(buf.out))
@@ -347,12 +317,15 @@ func (idx *Index) Search(query []float32, k int) ([]Node, error) {
 	return res, nil
 }
 
-// Insert adds a new vector to the index.
 func (idx *Index) Insert(vec []float32) error {
+	if len(vec) != int(idx.storage.config.Dims) {
+		return fmt.Errorf("hnsw: vector dims %d != index dims %d", len(vec), idx.storage.config.Dims)
+	}
+
 	level := idx.randomLevel()
 
 	idx.mu.Lock()
-	id, err := idx.storage.AddNode()
+	id, err := idx.storage.addNode()
 	if err != nil {
 		idx.mu.Unlock()
 		return err
@@ -363,9 +336,9 @@ func (idx *Index) Insert(vec []float32) error {
 		idx.entryPoint = id
 		idx.maxLevel = level
 		idx.storage.writeUint32(24, id)
-		idx.storage.writeUint32(20, uint32(level))
-		idx.storage.SetLevel(id, level)
-		idx.storage.SetVector(id, vec)
+		idx.storage.writeUint32(36, uint32(level))
+		idx.storage.setLevel(id, level)
+		idx.storage.setVector(id, vec)
 		idx.mu.Unlock()
 		return nil
 	}
@@ -373,11 +346,10 @@ func (idx *Index) Insert(vec []float32) error {
 	currEntryPoint := idx.entryPoint
 	currMaxLevel := idx.maxLevel
 	efConst := idx.efConst
-	idx.mu.Unlock()
-	idx.mu.RLock()
+	nodeCount := idx.nodeCount
 	idx.storage.ReadLock()
+	idx.mu.Unlock()
 
-	// Initial greedy search to the insertion level
 	currNode := currEntryPoint
 	currDist := idx.distFunc(vec, idx.storage.GetVector(currNode))
 
@@ -397,11 +369,11 @@ func (idx *Index) Insert(vec []float32) error {
 		}
 	}
 
-	idx.storage.SetLevel(id, level)
-	idx.storage.SetVector(id, vec)
+	idx.storage.setLevel(id, level)
+	idx.storage.setVector(id, vec)
 
 	for l := min(level, currMaxLevel); l >= 0; l-- {
-		candidates := idx.findNeighborsAtLayer(vec, currNode, l, efConst)
+		candidates := idx.findNeighborsAtLayer(vec, currNode, l, efConst, nodeCount)
 
 		limit := idx.m
 		if l == 0 {
@@ -411,12 +383,10 @@ func (idx *Index) Insert(vec []float32) error {
 		selected := idx.selectNeighbors(candidates, limit)
 		idx.storage.SetNeighbors(id, l, selected)
 
-		// Bi-directional link
 		for _, nb := range selected {
 			idx.storage.LockNode(nb)
 			nbList := idx.storage.GetNeighbors(nb, l)
 
-			// Copy nbList and add id
 			newNbList := make([]uint32, len(nbList), len(nbList)+1)
 			copy(newNbList, nbList)
 			newNbList = append(newNbList, id)
@@ -430,15 +400,14 @@ func (idx *Index) Insert(vec []float32) error {
 		}
 	}
 
-	// Update global max level if needed
 	idx.storage.ReadUnlock()
-	idx.mu.RUnlock()
+
 	if level > currMaxLevel {
 		idx.mu.Lock()
 		if level > idx.maxLevel {
 			idx.maxLevel = level
 			idx.entryPoint = id
-			idx.storage.writeUint32(20, uint32(level))
+			idx.storage.writeUint32(36, uint32(level))
 			idx.storage.writeUint32(24, id)
 		}
 		idx.mu.Unlock()
@@ -448,17 +417,21 @@ func (idx *Index) Insert(vec []float32) error {
 }
 
 func (idx *Index) randomLevel() int {
-	l := 0
-	for rand.Float64() < 0.5 && l < int(idx.storage.config.MaxLevel) {
-		l++
+	mL := 1.0 / math.Log(float64(idx.m))
+	level := int(-math.Log(1.0-rand.Float64()) * mL)
+	if level < 0 {
+		level = 0
 	}
-	return l
+	if level >= int(idx.storage.config.MaxLevel) {
+		level = int(idx.storage.config.MaxLevel) - 1
+	}
+	return level
 }
 
-func (idx *Index) findNeighborsAtLayer(vec []float32, entry uint32, layer, ef int) []Node {
+func (idx *Index) findNeighborsAtLayer(vec []float32, entry uint32, layer, ef int, nodeCount uint32) []Node {
 	buf := idx.pool.Get().(*searchBuffer)
 	defer idx.pool.Put(buf)
-	buf.reset(idx.nodeCount)
+	buf.reset(nodeCount)
 
 	dist := idx.distFunc(vec, idx.storage.GetVector(entry))
 	buf.candidates.Push(Node{ID: entry, Distance: dist})
@@ -495,7 +468,6 @@ func (idx *Index) findNeighborsAtLayer(vec []float32, entry uint32, layer, ef in
 	for len(buf.results.Nodes) > 0 {
 		buf.out = append(buf.out, buf.results.Pop())
 	}
-	// Reverse to get closest first
 	slices.Reverse(buf.out)
 
 	res := make([]Node, len(buf.out))
@@ -512,7 +484,6 @@ func (idx *Index) selectNeighbors(candidates []Node, m int) []uint32 {
 		return res
 	}
 
-	// Use a small fixed buffer for diversity check to avoid allocations for small M
 	var resultBuf [64]Node
 	var result []Node
 	if m <= len(resultBuf) {
@@ -521,6 +492,7 @@ func (idx *Index) selectNeighbors(candidates []Node, m int) []uint32 {
 		result = make([]Node, 0, m)
 	}
 
+	var discarded []Node
 	for _, c := range candidates {
 		if len(result) >= m {
 			break
@@ -537,7 +509,16 @@ func (idx *Index) selectNeighbors(candidates []Node, m int) []uint32 {
 
 		if isDiverse {
 			result = append(result, c)
+		} else {
+			discarded = append(discarded, c)
 		}
+	}
+
+	for _, d := range discarded {
+		if len(result) >= m {
+			break
+		}
+		result = append(result, d)
 	}
 
 	res := make([]uint32, len(result))
@@ -572,7 +553,7 @@ func (idx *Index) shrinkNeighbors(neighbors []uint32, vec []float32, limit int) 
 		heapNodes = make([]Node, 0, len(nodes))
 	}
 
-	h := NodeHeap{Nodes: heapNodes}
+	h := nodeHeap{Nodes: heapNodes}
 	for _, n := range nodes {
 		h.Push(n)
 	}
@@ -583,15 +564,4 @@ func (idx *Index) shrinkNeighbors(neighbors []uint32, vec []float32, limit int) 
 	}
 
 	return idx.selectNeighbors(sorted, limit)
-}
-
-func (s *Storage) SetLevel(id uint32, level int) {
-	data := s.GetNodeData(id)
-	binary.LittleEndian.PutUint32(data[s.layout.LevelOffset:s.layout.LevelOffset+4], uint32(level))
-}
-
-func (s *Storage) SetVector(id uint32, vec []float32) {
-	data := s.GetNodeData(id)
-	vecData := data[s.layout.VectorOffset : s.layout.VectorOffset+(s.config.Dims*4)]
-	copy(unsafe.Slice((*float32)(unsafe.Pointer(&vecData[0])), s.config.Dims), vec)
 }
