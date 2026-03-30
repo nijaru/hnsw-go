@@ -84,6 +84,7 @@ func benchmarkBuild(vectors [][]float32) {
 
 		storage.Close()
 		os.Remove(path)
+		os.Remove(path + ".vec")
 
 		total += elapsed
 		if run == 0 || elapsed < best {
@@ -96,7 +97,11 @@ func benchmarkBuild(vectors [][]float32) {
 
 	avg := total / runs
 	fmt.Println("=== Build ===")
-	fmt.Printf("  Avg:    %s (%.0f vecs/sec)\n", avg.Round(time.Microsecond), float64(len(vectors))/avg.Seconds())
+	fmt.Printf(
+		"  Avg:    %s (%.0f vecs/sec)\n",
+		avg.Round(time.Microsecond),
+		float64(len(vectors))/avg.Seconds(),
+	)
 	fmt.Printf("  Best:   %s\n", best.Round(time.Microsecond))
 	fmt.Printf("  Worst:  %s\n", worst.Round(time.Microsecond))
 	fmt.Println()
@@ -113,6 +118,7 @@ func benchmarkSearch(vectors, queries [][]float32, gt [][]int32) {
 	dims := uint32(len(vectors[0]))
 	path := fmt.Sprintf("%s/bench_search_%d.hnsw", os.TempDir(), os.Getpid())
 	defer os.Remove(path)
+	defer os.Remove(path + ".vec")
 
 	cfg := hnsw.IndexConfig{Dims: dims, M: M, MMax0: MMax0, MaxLevel: 16}
 	storage, err := hnsw.NewStorage(path, cfg, uint32(len(vectors)))
@@ -168,7 +174,10 @@ func benchmarkSearch(vectors, queries [][]float32, gt [][]int32) {
 	fmt.Println("=== Search ===")
 	fmt.Printf("  QPS:      %.0f\n", qps)
 	fmt.Printf("  Recall@%d: %.4f\n", K, avgRecall)
-	fmt.Printf("  Mean:     %s\n", (totalTime / time.Duration(len(queries))).Round(time.Microsecond))
+	fmt.Printf(
+		"  Mean:     %s\n",
+		(totalTime / time.Duration(len(queries))).Round(time.Microsecond),
+	)
 	fmt.Printf("  p50:      %s\n", p(0.50).Round(time.Microsecond))
 	fmt.Printf("  p90:      %s\n", p(0.90).Round(time.Microsecond))
 	fmt.Printf("  p99:      %s\n", p(0.99).Round(time.Microsecond))

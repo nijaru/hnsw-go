@@ -8,9 +8,14 @@ import (
 	"testing"
 )
 
+func removeTestFiles(path string) {
+	os.Remove(path)
+	os.Remove(path + ".vec")
+}
+
 func TestHNSW(t *testing.T) {
 	path := "test.hnsw"
-	defer os.Remove(path)
+	defer removeTestFiles(path)
 
 	config := IndexConfig{
 		Dims:     128,
@@ -61,7 +66,7 @@ func TestHNSW(t *testing.T) {
 
 func TestStorageGrow(t *testing.T) {
 	path := "test_grow.hnsw"
-	defer os.Remove(path)
+	defer removeTestFiles(path)
 
 	config := IndexConfig{
 		Dims:     4,
@@ -83,7 +88,7 @@ func TestStorageGrow(t *testing.T) {
 
 func TestGrowTriggered(t *testing.T) {
 	path := "test_grow_trigger.hnsw"
-	defer os.Remove(path)
+	defer removeTestFiles(path)
 
 	config := IndexConfig{
 		Dims:     4,
@@ -129,7 +134,7 @@ func TestGrowTriggered(t *testing.T) {
 
 func TestSearchEmptyIndex(t *testing.T) {
 	path := "test_empty.hnsw"
-	defer os.Remove(path)
+	defer removeTestFiles(path)
 
 	config := IndexConfig{
 		Dims:     4,
@@ -157,7 +162,7 @@ func TestSearchEmptyIndex(t *testing.T) {
 
 func TestSearchKZero(t *testing.T) {
 	path := "test_k0.hnsw"
-	defer os.Remove(path)
+	defer removeTestFiles(path)
 
 	config := IndexConfig{
 		Dims:     4,
@@ -191,7 +196,7 @@ func TestSearchKZero(t *testing.T) {
 
 func TestSearchKGreaterThanNodeCount(t *testing.T) {
 	path := "test_kbig.hnsw"
-	defer os.Remove(path)
+	defer removeTestFiles(path)
 
 	config := IndexConfig{
 		Dims:     4,
@@ -227,7 +232,7 @@ func TestSearchKGreaterThanNodeCount(t *testing.T) {
 
 func TestWrongDimensions(t *testing.T) {
 	path := "test_wrongdims.hnsw"
-	defer os.Remove(path)
+	defer removeTestFiles(path)
 
 	config := IndexConfig{
 		Dims:     4,
@@ -257,7 +262,7 @@ func TestWrongDimensions(t *testing.T) {
 
 func TestInvalidConfig(t *testing.T) {
 	path := "test_badconfig.hnsw"
-	defer os.Remove(path)
+	defer removeTestFiles(path)
 
 	_, err := NewStorage(path, IndexConfig{Dims: 0, M: 16, MaxLevel: 4}, 10)
 	if err == nil {
@@ -280,7 +285,7 @@ func TestInvalidConfig(t *testing.T) {
 
 func TestCosineDistance(t *testing.T) {
 	path := "test_cosine.hnsw"
-	defer os.Remove(path)
+	defer removeTestFiles(path)
 
 	config := IndexConfig{
 		Dims:     4,
@@ -317,13 +322,17 @@ func TestCosineDistance(t *testing.T) {
 		t.Fatal("no results")
 	}
 	if results[0].ID != 0 {
-		t.Errorf("expected ID 0 (identical vector), got %d dist=%f", results[0].ID, results[0].Distance)
+		t.Errorf(
+			"expected ID 0 (identical vector), got %d dist=%f",
+			results[0].ID,
+			results[0].Distance,
+		)
 	}
 }
 
 func TestDotDistance(t *testing.T) {
 	path := "test_dot.hnsw"
-	defer os.Remove(path)
+	defer removeTestFiles(path)
 
 	config := IndexConfig{
 		Dims:     4,
@@ -360,13 +369,17 @@ func TestDotDistance(t *testing.T) {
 		t.Fatal("no results")
 	}
 	if results[0].ID != 2 {
-		t.Errorf("expected ID 2 (highest dot product), got %d dist=%f", results[0].ID, results[0].Distance)
+		t.Errorf(
+			"expected ID 2 (highest dot product), got %d dist=%f",
+			results[0].ID,
+			results[0].Distance,
+		)
 	}
 }
 
 func TestConcurrentInsertSearch(t *testing.T) {
 	path := "test_concurrent.hnsw"
-	defer os.Remove(path)
+	defer removeTestFiles(path)
 
 	config := IndexConfig{
 		Dims:     128,
@@ -470,7 +483,7 @@ func TestConcurrentInsertSearch(t *testing.T) {
 
 func TestPersistence(t *testing.T) {
 	path := "test_persist.hnsw"
-	defer os.Remove(path)
+	defer removeTestFiles(path)
 
 	config := IndexConfig{
 		Dims:     4,

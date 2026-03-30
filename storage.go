@@ -11,18 +11,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func (s *Storage) Close() error {
-	if err := unix.Msync(s.data, unix.MS_SYNC); err != nil {
-		s.file.Close()
-		return err
-	}
-	if err := unix.Munmap(s.data); err != nil {
-		s.file.Close()
-		return err
-	}
-	return s.file.Close()
-}
-
 const (
 	HeaderSize = 64
 	Magic      = "HNSW"
@@ -36,14 +24,14 @@ type IndexConfig struct {
 }
 
 type NodeLayout struct {
-	NodeSize             uint32
+	GraphNodeSize        uint32
 	LockOffset           uint32
 	LevelOffset          uint32
 	L0CountOffset        uint32
-	UpperCountsOffset    uint32
-	VectorOffset         uint32
 	L0NeighborsOffset    uint32
+	UpperCountsOffset    uint32
 	UpperNeighborsOffset uint32
+	VectorSize           uint32
 }
 
 func NewNodeLayout(config IndexConfig) NodeLayout {
@@ -52,41 +40,43 @@ func NewNodeLayout(config IndexConfig) NodeLayout {
 		mMax0 = config.M * 2
 	}
 
-	layout := NodeLayout{}
+	var l NodeLayout
 	offset := uint32(0)
 
-	layout.LockOffset = offset
+	l.LockOffset = offset
 	offset += 4
 
-	layout.LevelOffset = offset
+	l.LevelOffset = offset
 	offset += 4
 
-	layout.L0CountOffset = offset
+	l.L0CountOffset = offset
 	offset += 4
 
-	layout.UpperCountsOffset = offset
-	offset += config.MaxLevel * 4
-
-	layout.VectorOffset = offset
-	offset += config.Dims * 4
-
-	layout.L0NeighborsOffset = offset
+	l.L0NeighborsOffset = offset
 	offset += mMax0 * 4
 
-	layout.UpperNeighborsOffset = offset
+	l.UpperCountsOffset = offset
+	offset += config.MaxLevel * 4
+
+	l.UpperNeighborsOffset = offset
 	offset += config.MaxLevel * config.M * 4
 
-	layout.NodeSize = (offset + 63) &^ 63
+	l.GraphNodeSize = (offset + 63) &^ 63
+	l.VectorSize = (config.Dims*4 + 63) &^ 63
 
-	return layout
+	return l
 }
 
 type Storage struct {
-	file   *os.File
-	data   []byte
-	config IndexConfig
-	layout NodeLayout
-	mu     sync.RWMutex
+	graphFile   *os.File
+	graphData   []byte
+	vecFile     *os.File
+	vecData     []byte
+	config      IndexConfig
+	layout      NodeLayout
+	mu          sync.RWMutex
+	vectorSlice []float32
+	vecLen      uint32
 }
 
 func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage, error) {
@@ -105,80 +95,163 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 	}
 
 	layout := NewNodeLayout(config)
-	totalSize := uint64(HeaderSize) + uint64(initialNodes)*uint64(layout.NodeSize)
 
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o666)
+	graphSize := uint64(HeaderSize) + uint64(initialNodes)*uint64(layout.GraphNodeSize)
+	vecSize := uint64(initialNodes) * uint64(layout.VectorSize)
+
+	graphFile, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o666)
 	if err != nil {
+		return nil, fmt.Errorf("graph file: %w", err)
+	}
+
+	vecPath := path + ".vec"
+	vecFile, err := os.OpenFile(vecPath, os.O_RDWR|os.O_CREATE, 0o666)
+	if err != nil {
+		graphFile.Close()
+		return nil, fmt.Errorf("vector file: %w", err)
+	}
+
+	graphInfo, err := graphFile.Stat()
+	if err != nil {
+		vecFile.Close()
+		graphFile.Close()
 		return nil, err
 	}
 
-	info, err := file.Stat()
+	vecInfo, err := vecFile.Stat()
 	if err != nil {
-		file.Close()
+		vecFile.Close()
+		graphFile.Close()
 		return nil, err
 	}
 
-	var mmapSize int
-	if info.Size() < int64(totalSize) {
-		if err := file.Truncate(int64(totalSize)); err != nil {
-			file.Close()
-			return nil, err
+	graphMmapSize := max(int(graphInfo.Size()), int(graphSize))
+	if graphInfo.Size() < int64(graphSize) {
+		if err := graphFile.Truncate(int64(graphSize)); err != nil {
+			vecFile.Close()
+			graphFile.Close()
+			return nil, fmt.Errorf("graph truncate: %w", err)
 		}
-		mmapSize = int(totalSize)
-	} else {
-		mmapSize = int(info.Size())
+		graphMmapSize = int(graphSize)
 	}
 
-	data, err := unix.Mmap(
-		int(file.Fd()),
-		0,
-		mmapSize,
-		unix.PROT_READ|unix.PROT_WRITE,
-		unix.MAP_SHARED,
+	vecMmapSize := max(int(vecInfo.Size()), int(vecSize))
+	if vecInfo.Size() < int64(vecSize) {
+		if err := vecFile.Truncate(int64(vecSize)); err != nil {
+			vecFile.Close()
+			graphFile.Close()
+			return nil, fmt.Errorf("vector truncate: %w", err)
+		}
+		vecMmapSize = int(vecSize)
+	}
+
+	graphData, err := unix.Mmap(
+		int(graphFile.Fd()), 0, graphMmapSize,
+		unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED,
 	)
 	if err != nil {
-		file.Close()
-		return nil, err
+		vecFile.Close()
+		graphFile.Close()
+		return nil, fmt.Errorf("graph mmap: %w", err)
+	}
+
+	vecData, err := unix.Mmap(
+		int(vecFile.Fd()), 0, vecMmapSize,
+		unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED,
+	)
+	if err != nil {
+		unix.Munmap(graphData)
+		vecFile.Close()
+		graphFile.Close()
+		return nil, fmt.Errorf("vector mmap: %w", err)
 	}
 
 	s := &Storage{
-		file:   file,
-		data:   data,
-		config: config,
-		layout: layout,
+		graphFile: graphFile,
+		graphData: graphData,
+		vecFile:   vecFile,
+		vecData:   vecData,
+		config:    config,
+		layout:    layout,
+		vecLen:    config.Dims,
 	}
 
-	if info.Size() == 0 || s.readUint32(0) == 0 {
-		s.writeHeader()
+	if graphInfo.Size() == 0 || s.readUint32(0) == 0 {
+		s.writeHeader(initialNodes)
 	} else {
 		if err := s.validateHeader(); err != nil {
-			unix.Munmap(data)
-			file.Close()
+			unix.Munmap(vecData)
+			unix.Munmap(graphData)
+			vecFile.Close()
+			graphFile.Close()
 			return nil, err
 		}
 	}
+
+	s.vectorSlice = unsafe.Slice(
+		(*float32)(unsafe.Pointer(&s.vecData[0])),
+		uint64(len(s.vecData))/4,
+	)
 
 	return s, nil
 }
 
-func (s *Storage) writeHeader() {
-	copy(s.data[0:4], Magic)
-	s.writeUint32(4, 1)
+func (s *Storage) Close() error {
+	var errs []error
+	if s.graphData != nil {
+		if err := unix.Msync(s.graphData, unix.MS_SYNC); err != nil {
+			errs = append(errs, err)
+		}
+		if err := unix.Munmap(s.graphData); err != nil {
+			errs = append(errs, err)
+		}
+		s.graphData = nil
+	}
+	if s.vecData != nil {
+		if err := unix.Msync(s.vecData, unix.MS_SYNC); err != nil {
+			errs = append(errs, err)
+		}
+		if err := unix.Munmap(s.vecData); err != nil {
+			errs = append(errs, err)
+		}
+		s.vecData = nil
+	}
+	if s.graphFile != nil {
+		if err := s.graphFile.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if s.vecFile != nil {
+		if err := s.vecFile.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("close errors: %v", errs)
+	}
+	return nil
+}
+
+func (s *Storage) writeHeader(initialNodes uint32) {
+	copy(s.graphData[0:4], Magic)
+	s.writeUint32(4, 2)
 	s.writeUint32(8, s.config.Dims)
 	s.writeUint32(12, s.config.M)
 	s.writeUint32(16, s.config.MMax0)
 	s.writeUint32(20, s.config.MaxLevel)
+	s.writeUint32(28, 0)
+	s.writeUint32(32, initialNodes)
 	s.writeUint32(36, 0)
-	s.writeUint32(32, (uint32(len(s.data))-HeaderSize)/s.layout.NodeSize)
 }
 
 func (s *Storage) validateHeader() error {
-	magic := string(s.data[0:4])
+	magic := string(s.graphData[0:4])
 	if magic != Magic {
 		return fmt.Errorf("invalid hnsw file: bad magic %q", magic)
 	}
-	if s.readUint32(4) != 1 {
-		return fmt.Errorf("unsupported hnsw version: %d", s.readUint32(4))
+	ver := s.readUint32(4)
+	if ver != 1 && ver != 2 {
+		return fmt.Errorf("unsupported hnsw version: %d", ver)
 	}
 	if s.readUint32(8) != s.config.Dims {
 		return fmt.Errorf(
@@ -191,29 +264,37 @@ func (s *Storage) validateHeader() error {
 		return fmt.Errorf("M mismatch: file has %d, config has %d", s.readUint32(12), s.config.M)
 	}
 	if s.readUint32(16) != s.config.MMax0 {
-		return fmt.Errorf("MMax0 mismatch: file has %d, config has %d", s.readUint32(16), s.config.MMax0)
+		return fmt.Errorf(
+			"MMax0 mismatch: file has %d, config has %d",
+			s.readUint32(16),
+			s.config.MMax0,
+		)
 	}
 	if s.readUint32(20) != s.config.MaxLevel {
-		return fmt.Errorf("MaxLevel mismatch: file has %d, config has %d", s.readUint32(20), s.config.MaxLevel)
+		return fmt.Errorf(
+			"MaxLevel mismatch: file has %d, config has %d",
+			s.readUint32(20),
+			s.config.MaxLevel,
+		)
 	}
 	return nil
 }
 
 func (s *Storage) readUint32(offset uint32) uint32 {
-	return binary.LittleEndian.Uint32(s.data[offset : offset+4])
+	return binary.LittleEndian.Uint32(s.graphData[offset : offset+4])
 }
 
 func (s *Storage) writeUint32(offset uint32, val uint32) {
-	binary.LittleEndian.PutUint32(s.data[offset:offset+4], val)
+	binary.LittleEndian.PutUint32(s.graphData[offset:offset+4], val)
 }
 
-func (s *Storage) getNodeData(id uint32) []byte {
-	offset := uint64(HeaderSize) + uint64(id)*uint64(s.layout.NodeSize)
-	end := offset + uint64(s.layout.NodeSize)
-	if end > uint64(len(s.data)) {
+func (s *Storage) getGraphNode(id uint32) []byte {
+	offset := uint64(HeaderSize) + uint64(id)*uint64(s.layout.GraphNodeSize)
+	end := offset + uint64(s.layout.GraphNodeSize)
+	if end > uint64(len(s.graphData)) {
 		panic("hnsw: node id out of bounds")
 	}
-	return s.data[offset:end]
+	return s.graphData[offset:end]
 }
 
 func (s *Storage) ReadLock() {
@@ -225,13 +306,16 @@ func (s *Storage) ReadUnlock() {
 }
 
 func (s *Storage) GetVector(id uint32) []float32 {
-	data := s.getNodeData(id)
-	vecData := data[s.layout.VectorOffset : s.layout.VectorOffset+(s.config.Dims*4)]
-	return unsafe.Slice((*float32)(unsafe.Pointer(&vecData[0])), s.config.Dims)
+	vecOffset := uint64(id) * uint64(s.layout.VectorSize) / 4
+	end := vecOffset + uint64(s.config.Dims)
+	if end*4 > uint64(len(s.vecData)) {
+		panic("hnsw: vector id out of bounds")
+	}
+	return s.vectorSlice[vecOffset : vecOffset+uint64(s.config.Dims)]
 }
 
 func (s *Storage) GetNeighbors(id uint32, layer int) []uint32 {
-	data := s.getNodeData(id)
+	data := s.getGraphNode(id)
 	var neighborsData []byte
 	var count int
 
@@ -254,7 +338,7 @@ func (s *Storage) GetNeighbors(id uint32, layer int) []uint32 {
 }
 
 func (s *Storage) SetNeighbors(id uint32, layer int, neighbors []uint32) {
-	data := s.getNodeData(id)
+	data := s.getGraphNode(id)
 	if layer == 0 {
 		binary.LittleEndian.PutUint32(
 			data[s.layout.L0CountOffset:s.layout.L0CountOffset+4],
@@ -275,14 +359,14 @@ func (s *Storage) SetNeighbors(id uint32, layer int, neighbors []uint32) {
 }
 
 func (s *Storage) LockNode(id uint32) {
-	data := s.getNodeData(id)
+	data := s.getGraphNode(id)
 	lockPtr := (*uint32)(unsafe.Pointer(&data[s.layout.LockOffset]))
 	for !atomic.CompareAndSwapUint32(lockPtr, 0, 1) {
 	}
 }
 
 func (s *Storage) UnlockNode(id uint32) {
-	data := s.getNodeData(id)
+	data := s.getGraphNode(id)
 	lockPtr := (*uint32)(unsafe.Pointer(&data[s.layout.LockOffset]))
 	atomic.StoreUint32(lockPtr, 0)
 }
@@ -310,41 +394,60 @@ func (s *Storage) grow(newAllocated uint32) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	newSize := uint64(HeaderSize) + uint64(newAllocated)*uint64(s.layout.NodeSize)
+	newGraphSize := uint64(HeaderSize) + uint64(newAllocated)*uint64(s.layout.GraphNodeSize)
+	newVecSize := uint64(newAllocated) * uint64(s.layout.VectorSize)
 
-	if err := s.file.Truncate(int64(newSize)); err != nil {
-		return fmt.Errorf("truncate: %w", err)
+	if err := s.graphFile.Truncate(int64(newGraphSize)); err != nil {
+		return fmt.Errorf("graph truncate: %w", err)
 	}
 
-	data, err := unix.Mmap(
-		int(s.file.Fd()),
-		0,
-		int(newSize),
-		unix.PROT_READ|unix.PROT_WRITE,
-		unix.MAP_SHARED,
+	if err := s.vecFile.Truncate(int64(newVecSize)); err != nil {
+		return fmt.Errorf("vector truncate: %w", err)
+	}
+
+	graphData, err := unix.Mmap(
+		int(s.graphFile.Fd()), 0, int(newGraphSize),
+		unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED,
 	)
 	if err != nil {
-		return fmt.Errorf("mmap: %w", err)
+		return fmt.Errorf("graph mmap: %w", err)
 	}
 
-	oldData := s.data
-	s.data = data
-	s.writeUint32(32, newAllocated)
+	vecData, err := unix.Mmap(
+		int(s.vecFile.Fd()), 0, int(newVecSize),
+		unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED,
+	)
+	if err != nil {
+		unix.Munmap(graphData)
+		return fmt.Errorf("vector mmap: %w", err)
+	}
 
-	if oldData != nil {
-		unix.Munmap(oldData)
+	oldGraph := s.graphData
+	oldVec := s.vecData
+	s.graphData = graphData
+	s.vecData = vecData
+	s.writeUint32(32, newAllocated)
+	s.vectorSlice = unsafe.Slice(
+		(*float32)(unsafe.Pointer(&s.vecData[0])),
+		uint64(len(s.vecData))/4,
+	)
+
+	if oldGraph != nil {
+		unix.Munmap(oldGraph)
+	}
+	if oldVec != nil {
+		unix.Munmap(oldVec)
 	}
 
 	return nil
 }
 
 func (s *Storage) setLevel(id uint32, level int) {
-	data := s.getNodeData(id)
+	data := s.getGraphNode(id)
 	binary.LittleEndian.PutUint32(data[s.layout.LevelOffset:s.layout.LevelOffset+4], uint32(level))
 }
 
 func (s *Storage) setVector(id uint32, vec []float32) {
-	data := s.getNodeData(id)
-	vecData := data[s.layout.VectorOffset : s.layout.VectorOffset+(s.config.Dims*4)]
-	copy(unsafe.Slice((*float32)(unsafe.Pointer(&vecData[0])), s.config.Dims), vec)
+	dst := s.GetVector(id)
+	copy(dst, vec)
 }

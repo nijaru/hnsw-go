@@ -3,13 +3,12 @@ package hnsw
 import (
 	"fmt"
 	"math/rand/v2"
-	"os"
 	"testing"
 )
 
 func BenchmarkHNSWBuild(b *testing.B) {
 	path := "bench_build.hnsw"
-	defer os.Remove(path)
+	defer removeTestFiles(path)
 
 	config := IndexConfig{
 		Dims:     128,
@@ -40,7 +39,7 @@ func BenchmarkHNSWBuild(b *testing.B) {
 
 func BenchmarkHNSWSearch(b *testing.B) {
 	path := fmt.Sprintf("bench_search_%d.hnsw", rand.Int64())
-	defer os.Remove(path)
+	defer removeTestFiles(path)
 
 	config := IndexConfig{
 		Dims:     128,

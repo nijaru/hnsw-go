@@ -28,7 +28,13 @@ func loadSIFT10kBinary(t testing.TB) (vectors, queries [][]float32, groundTruth 
 	dims := r.uint32()
 	topK := r.uint32()
 
-	t.Logf("Loading SIFT 10k: %d vectors, %d queries, %d dims, topK=%d", numVec, numQuery, dims, topK)
+	t.Logf(
+		"Loading SIFT 10k: %d vectors, %d queries, %d dims, topK=%d",
+		numVec,
+		numQuery,
+		dims,
+		topK,
+	)
 
 	vectors = make([][]float32, numVec)
 	for i := range vectors {
@@ -97,7 +103,7 @@ func TestSIFT10kRecall(t *testing.T) {
 	vectors, queries, groundTruth := loadSIFT10kBinary(t)
 
 	path := fmt.Sprintf("sift10k_recall_%d.hnsw", rand.Int64())
-	defer os.Remove(path)
+	defer removeTestFiles(path)
 
 	config := IndexConfig{
 		Dims:     128,
@@ -178,8 +184,15 @@ func TestSIFT10kGroundTruthVerify(t *testing.T) {
 				bfDist := all[j].dist
 				if gtDist != bfDist {
 					mismatches++
-					t.Errorf("q=%d rank=%d: ground truth says id=%d (dist=%.6f) but brute force says id=%d (dist=%.6f)",
-						qi, j, gtID, gtDist, bfID, bfDist)
+					t.Errorf(
+						"q=%d rank=%d: ground truth says id=%d (dist=%.6f) but brute force says id=%d (dist=%.6f)",
+						qi,
+						j,
+						gtID,
+						gtDist,
+						bfID,
+						bfDist,
+					)
 					if mismatches >= 10 {
 						t.Fatalf("too many mismatches, stopping")
 					}
@@ -188,7 +201,11 @@ func TestSIFT10kGroundTruthVerify(t *testing.T) {
 		}
 	}
 	if mismatches == 0 {
-		t.Logf("Ground truth verified against brute force: all %d queries, top-%d each", len(queries), k)
+		t.Logf(
+			"Ground truth verified against brute force: all %d queries, top-%d each",
+			len(queries),
+			k,
+		)
 	}
 }
 
@@ -196,7 +213,7 @@ func TestSIFT10kRecallDistribution(t *testing.T) {
 	vectors, queries, groundTruth := loadSIFT10kBinary(t)
 
 	path := fmt.Sprintf("sift10k_dist_%d.hnsw", rand.Int64())
-	defer os.Remove(path)
+	defer removeTestFiles(path)
 
 	config := IndexConfig{
 		Dims:     128,
@@ -252,7 +269,7 @@ func TestSIFT10kSearchVsBruteForce(t *testing.T) {
 	vectors, queries, _ := loadSIFT10kBinary(t)
 
 	path := fmt.Sprintf("sift10k_bf_%d.hnsw", rand.Int64())
-	defer os.Remove(path)
+	defer removeTestFiles(path)
 
 	config := IndexConfig{
 		Dims:     128,
@@ -309,8 +326,15 @@ func TestSIFT10kSearchVsBruteForce(t *testing.T) {
 				hnswDist := L2(query, vectors[hnswID])
 				bfDist := all[j].dist
 				if hnswDist != bfDist {
-					t.Errorf("q=%d rank=%d: HNSW says id=%d (dist=%.6f) but brute force says id=%d (dist=%.6f)",
-						qi, j, hnswID, hnswDist, bfID, bfDist)
+					t.Errorf(
+						"q=%d rank=%d: HNSW says id=%d (dist=%.6f) but brute force says id=%d (dist=%.6f)",
+						qi,
+						j,
+						hnswID,
+						hnswDist,
+						bfID,
+						bfDist,
+					)
 				}
 			}
 		}
@@ -322,7 +346,7 @@ func TestSIFT10kPersistence(t *testing.T) {
 	vectors, _, _ := loadSIFT10kBinary(t)
 
 	path := fmt.Sprintf("sift10k_persist_%d.hnsw", rand.Int64())
-	defer os.Remove(path)
+	defer removeTestFiles(path)
 
 	config := IndexConfig{
 		Dims:     128,
@@ -366,5 +390,10 @@ func TestSIFT10kPersistence(t *testing.T) {
 	if len(results) == 0 {
 		t.Fatal("no results after reopen")
 	}
-	t.Logf("Persistence OK: %d nodes, top result ID=%d dist=%f", stats.NodeCount, results[0].ID, results[0].Distance)
+	t.Logf(
+		"Persistence OK: %d nodes, top result ID=%d dist=%f",
+		stats.NodeCount,
+		results[0].ID,
+		results[0].Distance,
+	)
 }

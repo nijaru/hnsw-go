@@ -32,9 +32,7 @@ go.work.sum
 
 # Test data/artifacts
 *.hnsw
+*.vec
 sift*_test.bin
 handoff.md
 
-# Editor/IDE
-# .idea/
-# .vscode/
