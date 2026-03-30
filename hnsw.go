@@ -232,7 +232,11 @@ func (idx *Index) Stats() Stats {
 
 func (idx *Index) Search(query []float32, k int) ([]Node, error) {
 	if len(query) != int(idx.storage.config.Dims) {
-		return nil, fmt.Errorf("hnsw: query dims %d != index dims %d", len(query), idx.storage.config.Dims)
+		return nil, fmt.Errorf(
+			"hnsw: query dims %d != index dims %d",
+			len(query),
+			idx.storage.config.Dims,
+		)
 	}
 	if k <= 0 {
 		return nil, nil
@@ -319,7 +323,11 @@ func (idx *Index) Search(query []float32, k int) ([]Node, error) {
 
 func (idx *Index) Insert(vec []float32) error {
 	if len(vec) != int(idx.storage.config.Dims) {
-		return fmt.Errorf("hnsw: vector dims %d != index dims %d", len(vec), idx.storage.config.Dims)
+		return fmt.Errorf(
+			"hnsw: vector dims %d != index dims %d",
+			len(vec),
+			idx.storage.config.Dims,
+		)
 	}
 
 	level := idx.randomLevel()
@@ -372,8 +380,11 @@ func (idx *Index) Insert(vec []float32) error {
 	idx.storage.setLevel(id, level)
 	idx.storage.setVector(id, vec)
 
+	insertBuf := idx.pool.Get().(*searchBuffer)
+	defer idx.pool.Put(insertBuf)
+
 	for l := min(level, currMaxLevel); l >= 0; l-- {
-		candidates := idx.findNeighborsAtLayer(vec, currNode, l, efConst, nodeCount)
+		candidates := idx.findNeighborsAtLayer(vec, currNode, l, efConst, nodeCount, insertBuf)
 
 		limit := idx.m
 		if l == 0 {
@@ -383,19 +394,26 @@ func (idx *Index) Insert(vec []float32) error {
 		selected := idx.selectNeighbors(candidates, limit)
 		idx.storage.SetNeighbors(id, l, selected)
 
+		var linkBuf [64]uint32
 		for _, nb := range selected {
 			idx.storage.LockNode(nb)
 			nbList := idx.storage.GetNeighbors(nb, l)
 
-			newNbList := make([]uint32, len(nbList), len(nbList)+1)
-			copy(newNbList, nbList)
-			newNbList = append(newNbList, id)
-
-			if len(newNbList) > limit {
-				nbVec := idx.storage.GetVector(nb)
-				newNbList = idx.shrinkNeighbors(newNbList, nbVec, limit)
+			n := len(nbList)
+			var tmp []uint32
+			if n+1 <= len(linkBuf) {
+				tmp = linkBuf[:n+1]
+			} else {
+				tmp = make([]uint32, n+1)
 			}
-			idx.storage.SetNeighbors(nb, l, newNbList)
+			copy(tmp, nbList)
+			tmp[n] = id
+
+			if len(tmp) > limit {
+				nbVec := idx.storage.GetVector(nb)
+				tmp = idx.shrinkNeighbors(tmp, nbVec, limit)
+			}
+			idx.storage.SetNeighbors(nb, l, tmp)
 			idx.storage.UnlockNode(nb)
 		}
 	}
@@ -428,9 +446,13 @@ func (idx *Index) randomLevel() int {
 	return level
 }
 
-func (idx *Index) findNeighborsAtLayer(vec []float32, entry uint32, layer, ef int, nodeCount uint32) []Node {
-	buf := idx.pool.Get().(*searchBuffer)
-	defer idx.pool.Put(buf)
+func (idx *Index) findNeighborsAtLayer(
+	vec []float32,
+	entry uint32,
+	layer, ef int,
+	nodeCount uint32,
+	buf *searchBuffer,
+) []Node {
 	buf.reset(nodeCount)
 
 	dist := idx.distFunc(vec, idx.storage.GetVector(entry))
@@ -465,19 +487,18 @@ func (idx *Index) findNeighborsAtLayer(vec []float32, entry uint32, layer, ef in
 		}
 	}
 
+	buf.out = buf.out[:0]
 	for len(buf.results.Nodes) > 0 {
 		buf.out = append(buf.out, buf.results.Pop())
 	}
 	slices.Reverse(buf.out)
-
-	res := make([]Node, len(buf.out))
-	copy(res, buf.out)
-	return res
+	return buf.out
 }
 
 func (idx *Index) selectNeighbors(candidates []Node, m int) []uint32 {
 	if len(candidates) <= m {
-		res := make([]uint32, len(candidates))
+		var resBuf [64]uint32
+		res := resBuf[:len(candidates)]
 		for i, c := range candidates {
 			res[i] = c.ID
 		}
@@ -492,7 +513,9 @@ func (idx *Index) selectNeighbors(candidates []Node, m int) []uint32 {
 		result = make([]Node, 0, m)
 	}
 
-	var discarded []Node
+	var discardBuf [64]Node
+	discarded := discardBuf[:0]
+
 	for _, c := range candidates {
 		if len(result) >= m {
 			break
@@ -521,7 +544,8 @@ func (idx *Index) selectNeighbors(candidates []Node, m int) []uint32 {
 		result = append(result, d)
 	}
 
-	res := make([]uint32, len(result))
+	var resBuf [64]uint32
+	res := resBuf[:len(result)]
 	for i, r := range result {
 		res[i] = r.ID
 	}
