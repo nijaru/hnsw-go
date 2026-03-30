@@ -76,9 +76,291 @@ func TestStorageGrow(t *testing.T) {
 	}
 	defer storage.Close()
 
-	// Initial node count should be 0, Allocated should be 10
 	if storage.readUint32(32) != 10 {
 		t.Errorf("expected 10 allocated nodes, got %d", storage.readUint32(32))
+	}
+}
+
+func TestGrowTriggered(t *testing.T) {
+	path := "test_grow_trigger.hnsw"
+	defer os.Remove(path)
+
+	config := IndexConfig{
+		Dims:     4,
+		M:        4,
+		MMax0:    8,
+		MaxLevel: 4,
+	}
+
+	storage, err := NewStorage(path, config, 5)
+	if err != nil {
+		t.Fatalf("create storage: %v", err)
+	}
+	defer storage.Close()
+
+	idx := NewIndex(storage, L2, 10, 10)
+
+	for i := 0; i < 20; i++ {
+		vec := make([]float32, 4)
+		for j := range vec {
+			vec[j] = rand.Float32()
+		}
+		if err := idx.Insert(vec); err != nil {
+			t.Fatalf("insert %d: %v", i, err)
+		}
+	}
+
+	if idx.Len() != 20 {
+		t.Errorf("expected 20 nodes, got %d", idx.Len())
+	}
+
+	query := make([]float32, 4)
+	for j := range query {
+		query[j] = rand.Float32()
+	}
+	results, err := idx.Search(query, 5)
+	if err != nil {
+		t.Fatalf("search after grow: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("no results after grow")
+	}
+}
+
+func TestSearchEmptyIndex(t *testing.T) {
+	path := "test_empty.hnsw"
+	defer os.Remove(path)
+
+	config := IndexConfig{
+		Dims:     4,
+		M:        4,
+		MMax0:    8,
+		MaxLevel: 4,
+	}
+
+	storage, err := NewStorage(path, config, 10)
+	if err != nil {
+		t.Fatalf("create storage: %v", err)
+	}
+	defer storage.Close()
+
+	idx := NewIndex(storage, L2, 10, 10)
+
+	results, err := idx.Search(make([]float32, 4), 5)
+	if err != nil {
+		t.Fatalf("search empty: %v", err)
+	}
+	if results != nil {
+		t.Errorf("expected nil results from empty index, got %v", results)
+	}
+}
+
+func TestSearchKZero(t *testing.T) {
+	path := "test_k0.hnsw"
+	defer os.Remove(path)
+
+	config := IndexConfig{
+		Dims:     4,
+		M:        4,
+		MMax0:    8,
+		MaxLevel: 4,
+	}
+
+	storage, err := NewStorage(path, config, 10)
+	if err != nil {
+		t.Fatalf("create storage: %v", err)
+	}
+	defer storage.Close()
+
+	idx := NewIndex(storage, L2, 10, 10)
+
+	vec := make([]float32, 4)
+	for j := range vec {
+		vec[j] = rand.Float32()
+	}
+	idx.Insert(vec)
+
+	results, err := idx.Search(make([]float32, 4), 0)
+	if err != nil {
+		t.Fatalf("search k=0: %v", err)
+	}
+	if results != nil {
+		t.Errorf("expected nil results for k=0, got %v", results)
+	}
+}
+
+func TestSearchKGreaterThanNodeCount(t *testing.T) {
+	path := "test_kbig.hnsw"
+	defer os.Remove(path)
+
+	config := IndexConfig{
+		Dims:     4,
+		M:        4,
+		MMax0:    8,
+		MaxLevel: 4,
+	}
+
+	storage, err := NewStorage(path, config, 10)
+	if err != nil {
+		t.Fatalf("create storage: %v", err)
+	}
+	defer storage.Close()
+
+	idx := NewIndex(storage, L2, 10, 10)
+
+	for i := 0; i < 3; i++ {
+		vec := make([]float32, 4)
+		for j := range vec {
+			vec[j] = rand.Float32()
+		}
+		idx.Insert(vec)
+	}
+
+	results, err := idx.Search(make([]float32, 4), 100)
+	if err != nil {
+		t.Fatalf("search k>count: %v", err)
+	}
+	if len(results) != 3 {
+		t.Errorf("expected 3 results, got %d", len(results))
+	}
+}
+
+func TestWrongDimensions(t *testing.T) {
+	path := "test_wrongdims.hnsw"
+	defer os.Remove(path)
+
+	config := IndexConfig{
+		Dims:     4,
+		M:        4,
+		MMax0:    8,
+		MaxLevel: 4,
+	}
+
+	storage, err := NewStorage(path, config, 10)
+	if err != nil {
+		t.Fatalf("create storage: %v", err)
+	}
+	defer storage.Close()
+
+	idx := NewIndex(storage, L2, 10, 10)
+
+	err = idx.Insert(make([]float32, 8))
+	if err == nil {
+		t.Fatal("expected error for wrong dims in Insert")
+	}
+
+	_, err = idx.Search(make([]float32, 8), 5)
+	if err == nil {
+		t.Fatal("expected error for wrong dims in Search")
+	}
+}
+
+func TestInvalidConfig(t *testing.T) {
+	path := "test_badconfig.hnsw"
+	defer os.Remove(path)
+
+	_, err := NewStorage(path, IndexConfig{Dims: 0, M: 16, MaxLevel: 4}, 10)
+	if err == nil {
+		t.Fatal("expected error for Dims=0")
+		os.Remove(path)
+	}
+
+	_, err = NewStorage(path, IndexConfig{Dims: 4, M: 0, MaxLevel: 4}, 10)
+	if err == nil {
+		t.Fatal("expected error for M=0")
+		os.Remove(path)
+	}
+
+	_, err = NewStorage(path, IndexConfig{Dims: 4, M: 16, MaxLevel: 0}, 10)
+	if err == nil {
+		t.Fatal("expected error for MaxLevel=0")
+		os.Remove(path)
+	}
+}
+
+func TestCosineDistance(t *testing.T) {
+	path := "test_cosine.hnsw"
+	defer os.Remove(path)
+
+	config := IndexConfig{
+		Dims:     4,
+		M:        4,
+		MMax0:    8,
+		MaxLevel: 4,
+	}
+
+	storage, err := NewStorage(path, config, 100)
+	if err != nil {
+		t.Fatalf("create storage: %v", err)
+	}
+	defer storage.Close()
+
+	idx := NewIndex(storage, Cosine, 10, 10)
+
+	vecs := [][]float32{
+		{1, 0, 0, 0},
+		{0, 1, 0, 0},
+		{1, 1, 0, 0},
+		{0, 0, 1, 0},
+	}
+	for _, v := range vecs {
+		if err := idx.Insert(v); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+	}
+
+	results, err := idx.Search([]float32{1, 0, 0, 0}, 2)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("no results")
+	}
+	if results[0].ID != 0 {
+		t.Errorf("expected ID 0 (identical vector), got %d dist=%f", results[0].ID, results[0].Distance)
+	}
+}
+
+func TestDotDistance(t *testing.T) {
+	path := "test_dot.hnsw"
+	defer os.Remove(path)
+
+	config := IndexConfig{
+		Dims:     4,
+		M:        4,
+		MMax0:    8,
+		MaxLevel: 4,
+	}
+
+	storage, err := NewStorage(path, config, 100)
+	if err != nil {
+		t.Fatalf("create storage: %v", err)
+	}
+	defer storage.Close()
+
+	idx := NewIndex(storage, Dot, 10, 10)
+
+	vecs := [][]float32{
+		{1, 0, 0, 0},
+		{0, 1, 0, 0},
+		{2, 1, 0, 0},
+		{0, 0, 1, 0},
+	}
+	for _, v := range vecs {
+		if err := idx.Insert(v); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+	}
+
+	results, err := idx.Search([]float32{1, 0, 0, 0}, 2)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("no results")
+	}
+	if results[0].ID != 2 {
+		t.Errorf("expected ID 2 (highest dot product), got %d dist=%f", results[0].ID, results[0].Distance)
 	}
 }
 
@@ -101,7 +383,6 @@ func TestConcurrentInsertSearch(t *testing.T) {
 
 	idx := NewIndex(storage, L2, 50, 50)
 
-	// Insert 100 vectors sequentially first (seed)
 	for i := 0; i < 100; i++ {
 		vec := make([]float32, 128)
 		for j := range vec {
@@ -112,7 +393,6 @@ func TestConcurrentInsertSearch(t *testing.T) {
 		}
 	}
 
-	// Concurrent: 8 inserters, 16 searchers, 500 ops each
 	const inserters = 8
 	const searchers = 16
 	const opsPerGoroutine = 500
@@ -174,7 +454,6 @@ func TestConcurrentInsertSearch(t *testing.T) {
 		t.Errorf("expected %d nodes, got %d", expected, stats.NodeCount)
 	}
 
-	// Final sanity search
 	query := make([]float32, 128)
 	for j := range query {
 		query[j] = rand.Float32()
@@ -187,4 +466,62 @@ func TestConcurrentInsertSearch(t *testing.T) {
 		t.Fatal("no results after concurrent ops")
 	}
 	t.Logf("Concurrent test passed: %d nodes, final search OK", stats.NodeCount)
+}
+
+func TestPersistence(t *testing.T) {
+	path := "test_persist.hnsw"
+	defer os.Remove(path)
+
+	config := IndexConfig{
+		Dims:     4,
+		M:        4,
+		MMax0:    8,
+		MaxLevel: 4,
+	}
+
+	vecs := make([][]float32, 50)
+	for i := range vecs {
+		vecs[i] = make([]float32, 4)
+		for j := range vecs[i] {
+			vecs[i][j] = rand.Float32()
+		}
+	}
+
+	func() {
+		storage, err := NewStorage(path, config, 100)
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		defer storage.Close()
+
+		idx := NewIndex(storage, L2, 20, 20)
+		for _, v := range vecs {
+			if err := idx.Insert(v); err != nil {
+				t.Fatalf("insert: %v", err)
+			}
+		}
+	}()
+
+	storage2, err := NewStorage(path, config, 0)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer storage2.Close()
+
+	idx2 := NewIndex(storage2, L2, 20, 20)
+	stats := idx2.Stats()
+	if stats.NodeCount != 50 {
+		t.Errorf("expected 50 nodes after reopen, got %d", stats.NodeCount)
+	}
+
+	results, err := idx2.Search(vecs[0], 5)
+	if err != nil {
+		t.Fatalf("search after reopen: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("no results after reopen")
+	}
+	if results[0].ID != 0 {
+		t.Errorf("expected ID 0 (self-search), got %d dist=%f", results[0].ID, results[0].Distance)
+	}
 }
