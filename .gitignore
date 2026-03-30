@@ -27,6 +27,14 @@ go.work.sum
 # env file
 .env
 
+# Profiling
+*.prof
+
+# Test data/artifacts
+*.hnsw
+sift*_test.bin
+handoff.md
+
 # Editor/IDE
 # .idea/
 # .vscode/

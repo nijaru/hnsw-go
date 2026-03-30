@@ -6,8 +6,9 @@ Designed for in-process use by AI agents and applications that need fast vector 
 
 ## Design
 
+- **Paper-faithful algorithm** — Level generation uses `floor(-ln(U) / ln(M))` (Malkov & Yashunin, Algorithm 1). Neighbor selection implements the diversity heuristic (Algorithm 4) with pruned-connection backfill.
 - **Mmap-backed storage** — Graph and vectors live in a memory-mapped file, bypassing the Go GC entirely. Reopen a file and the index is ready.
-- **Zero-allocation search** — Hot path uses `sync.Pool` for search buffers. Benchmarked at exactly 1 alloc/op (the result slice).
+- **Zero-allocation search path** — Hot path uses `sync.Pool` for visited sets and heaps. Generation-based `uint8` visited array. Only allocation is the result slice returned to the caller.
 - **Cache-optimized node layout** — Each node is a single 64-byte-aligned block containing metadata, vector, and all neighbor lists. Node ID directly resolves to a byte offset.
 - **Thread-safe** — `RWMutex` protects mmap remapping during concurrent inserts. Per-node spinlocks for fine-grained neighbor updates.
 - **Config validation** — Opening an existing file verifies stored parameters match the provided config, preventing silent corruption.
@@ -19,14 +20,14 @@ package main
 
 import (
     "fmt"
-    "github.com/nijaru/hnsw-go"
+    "github.com/omendb/hnsw-go"
 )
 
 func main() {
     config := hnsw.IndexConfig{
         Dims:     128,
         M:        16,
-        MMax0:    32,
+        MMax0:    32,      // defaults to 2*M if zero
         MaxLevel: 16,
     }
 
@@ -49,10 +50,10 @@ func main() {
 
 ```go
 type IndexConfig struct {
-    Dims     uint32  // Vector dimensions
-    M        uint32  // Max neighbors per layer (layer 1+)
-    MMax0    uint32  // Max neighbors at layer 0 (default: M * 2)
-    MaxLevel uint32  // Max graph levels
+    Dims     uint32  // Vector dimensions (required)
+    M        uint32  // Max neighbors per layer (required)
+    MMax0    uint32  // Max neighbors at layer 0 (default: 2*M)
+    MaxLevel uint32  // Max graph levels (required)
 }
 ```
 
@@ -60,29 +61,34 @@ type IndexConfig struct {
 
 | Method | Description |
 |--------|-------------|
-| `NewIndex(storage, distFunc, efSearch, efConst)` | Create index from storage |
-| `Insert(vec)` | Insert a vector |
-| `Search(query, k)` | Search for k nearest neighbors |
+| `NewIndex(storage, distFunc, efSearch, efConst)` | Create index from storage. efSearch defaults to 16, efConst to 200. |
+| `Insert(vec)` error | Insert a vector |
+| `Search(query, k)` ([]Node, error) | Search for k nearest neighbors |
 | `SetEfSearch(ef)` | Adjust search effort at runtime |
 | `SetEfConst(ef)` | Adjust construction effort at runtime |
-| `Len()` | Number of indexed vectors |
-| `Stats()` | Index statistics |
+| `Len()` int | Number of indexed vectors |
+| `Stats()` Stats | Index statistics |
 
 ### Distance Functions
 
-- `L2` — Euclidean distance (ILP-optimized with 4 accumulators)
-- `Cosine` — Cosine distance (1 - cosine similarity)
-- `Dot` — Negative dot product
+| Function | Metric | Notes |
+|----------|--------|-------|
+| `L2` | Euclidean distance | 4-accumulator loop for ILP |
+| `Cosine` | 1 - cosine similarity | Normalizes on the fly |
+| `Dot` | Negative dot product | For max-inner-product search |
 
 ## Performance
 
-On Apple M3 Max with SIFT 10k (128-dim, 10k vectors):
+Apple M3 Max, SIFT 10k (128-dim, 10,000 vectors), M=16, efSearch=200:
 
-- **Recall@10:** 99.99%
-- **Search latency:** ~128μs/query
-- **Search allocations:** 1 alloc/op (result copy only)
+| Metric | Value |
+|--------|-------|
+| Recall@10 | 99.99% |
+| QPS | 7,433 |
+| p50 latency | 133μs |
+| p99 latency | 241μs |
 
 ## Requirements
 
-- Go 1.26+
+- Go 1.24+
 - `golang.org/x/sys/unix` (mmap)
