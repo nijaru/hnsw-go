@@ -11,6 +11,7 @@ import (
 func removeTestFiles(path string) {
 	os.Remove(path)
 	os.Remove(path + ".vec")
+	os.Remove(path + ".upper")
 }
 
 func TestHNSW(t *testing.T) {
@@ -479,6 +480,55 @@ func TestConcurrentInsertSearch(t *testing.T) {
 		t.Fatal("no results after concurrent ops")
 	}
 	t.Logf("Concurrent test passed: %d nodes, final search OK", stats.NodeCount)
+}
+
+func TestMultiProbe(t *testing.T) {
+	path := "test_multiprobe.hnsw"
+	defer removeTestFiles(path)
+
+	config := IndexConfig{
+		Dims:     128,
+		M:        16,
+		MMax0:    32,
+		MaxLevel: 16,
+	}
+
+	storage, err := NewStorage(path, config, 1000)
+	if err != nil {
+		t.Fatalf("failed to create storage: %v", err)
+	}
+	defer storage.Close()
+
+	idx := NewIndex(storage, L2, 50, 50)
+
+	// Insert random vectors
+	for i := 0; i < 500; i++ {
+		vec := make([]float32, 128)
+		for j := range vec {
+			vec[j] = rand.Float32()
+		}
+		idx.Insert(vec)
+	}
+
+	query := make([]float32, 128)
+	for j := range query {
+		query[j] = rand.Float32()
+	}
+
+	// Compare k=1 search with different probe counts
+	idx.SetEfSearch(1) // Low efSearch to make it harder
+	idx.SetProbes(1)
+	res1, _ := idx.Search(query, 1)
+
+	idx.SetProbes(4)
+	res4, _ := idx.Search(query, 1)
+
+	if len(res1) > 0 && len(res4) > 0 {
+		if res4[0].Distance > res1[0].Distance {
+			t.Errorf("multi-probe (4) found worse result than single-probe: %f > %f", res4[0].Distance, res1[0].Distance)
+		}
+		t.Logf("Distances: probe=1: %f, probe=4: %f", res1[0].Distance, res4[0].Distance)
+	}
 }
 
 func TestPersistence(t *testing.T) {

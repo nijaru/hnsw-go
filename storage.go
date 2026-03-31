@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
-	"sync"
 	"sync/atomic"
 	"unsafe"
 
@@ -21,17 +20,17 @@ type IndexConfig struct {
 	M        uint32
 	MMax0    uint32
 	MaxLevel uint32
+	Probes   uint32
 }
 
 type NodeLayout struct {
-	GraphNodeSize        uint32
-	LockOffset           uint32
-	LevelOffset          uint32
-	L0CountOffset        uint32
-	L0NeighborsOffset    uint32
-	UpperCountsOffset    uint32
-	UpperNeighborsOffset uint32
-	VectorSize           uint32
+	GraphNodeSize     uint32
+	LockOffset        uint32
+	LevelOffset       uint32
+	L0CountOffset     uint32
+	L0NeighborsOffset uint32
+	UpperOffsetOffset uint32
+	VectorSize        uint32
 }
 
 func NewNodeLayout(config IndexConfig) NodeLayout {
@@ -55,11 +54,8 @@ func NewNodeLayout(config IndexConfig) NodeLayout {
 	l.L0NeighborsOffset = offset
 	offset += mMax0 * 4
 
-	l.UpperCountsOffset = offset
-	offset += config.MaxLevel * 4
-
-	l.UpperNeighborsOffset = offset
-	offset += config.MaxLevel * config.M * 4
+	l.UpperOffsetOffset = offset
+	offset += 4
 
 	l.GraphNodeSize = (offset + 63) &^ 63
 	l.VectorSize = (config.Dims*4 + 63) &^ 63
@@ -72,9 +68,10 @@ type Storage struct {
 	graphData   []byte
 	vecFile     *os.File
 	vecData     []byte
+	upperFile   *os.File
+	upperData   []byte
 	config      IndexConfig
 	layout      NodeLayout
-	mu          sync.RWMutex
 	vectorSlice []float32
 	vecLen      uint32
 }
@@ -98,6 +95,11 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 
 	graphSize := uint64(HeaderSize) + uint64(initialNodes)*uint64(layout.GraphNodeSize)
 	vecSize := uint64(initialNodes) * uint64(layout.VectorSize)
+	// Initial upper data size: ~1/16th of nodes * avg upper size
+	upperSize := uint64(initialNodes) / 16 * uint64(config.MaxLevel) * uint64(config.M+1) * 4
+	if upperSize < 4096 {
+		upperSize = 4096
+	}
 
 	graphFile, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o666)
 	if err != nil {
@@ -111,8 +113,17 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 		return nil, fmt.Errorf("vector file: %w", err)
 	}
 
+	upperPath := path + ".upper"
+	upperFile, err := os.OpenFile(upperPath, os.O_RDWR|os.O_CREATE, 0o666)
+	if err != nil {
+		vecFile.Close()
+		graphFile.Close()
+		return nil, fmt.Errorf("upper file: %w", err)
+	}
+
 	graphInfo, err := graphFile.Stat()
 	if err != nil {
+		upperFile.Close()
 		vecFile.Close()
 		graphFile.Close()
 		return nil, err
@@ -120,6 +131,15 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 
 	vecInfo, err := vecFile.Stat()
 	if err != nil {
+		upperFile.Close()
+		vecFile.Close()
+		graphFile.Close()
+		return nil, err
+	}
+
+	upperInfo, err := upperFile.Stat()
+	if err != nil {
+		upperFile.Close()
 		vecFile.Close()
 		graphFile.Close()
 		return nil, err
@@ -128,6 +148,7 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 	graphMmapSize := max(int(graphInfo.Size()), int(graphSize))
 	if graphInfo.Size() < int64(graphSize) {
 		if err := graphFile.Truncate(int64(graphSize)); err != nil {
+			upperFile.Close()
 			vecFile.Close()
 			graphFile.Close()
 			return nil, fmt.Errorf("graph truncate: %w", err)
@@ -138,6 +159,7 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 	vecMmapSize := max(int(vecInfo.Size()), int(vecSize))
 	if vecInfo.Size() < int64(vecSize) {
 		if err := vecFile.Truncate(int64(vecSize)); err != nil {
+			upperFile.Close()
 			vecFile.Close()
 			graphFile.Close()
 			return nil, fmt.Errorf("vector truncate: %w", err)
@@ -145,11 +167,23 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 		vecMmapSize = int(vecSize)
 	}
 
+	upperMmapSize := max(int(upperInfo.Size()), int(upperSize))
+	if upperInfo.Size() < int64(upperSize) {
+		if err := upperFile.Truncate(int64(upperSize)); err != nil {
+			upperFile.Close()
+			vecFile.Close()
+			graphFile.Close()
+			return nil, fmt.Errorf("upper truncate: %w", err)
+		}
+		upperMmapSize = int(upperSize)
+	}
+
 	graphData, err := unix.Mmap(
 		int(graphFile.Fd()), 0, graphMmapSize,
 		unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED,
 	)
 	if err != nil {
+		upperFile.Close()
 		vecFile.Close()
 		graphFile.Close()
 		return nil, fmt.Errorf("graph mmap: %w", err)
@@ -161,9 +195,23 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 	)
 	if err != nil {
 		unix.Munmap(graphData)
+		upperFile.Close()
 		vecFile.Close()
 		graphFile.Close()
 		return nil, fmt.Errorf("vector mmap: %w", err)
+	}
+
+	upperData, err := unix.Mmap(
+		int(upperFile.Fd()), 0, upperMmapSize,
+		unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED,
+	)
+	if err != nil {
+		unix.Munmap(vecData)
+		unix.Munmap(graphData)
+		upperFile.Close()
+		vecFile.Close()
+		graphFile.Close()
+		return nil, fmt.Errorf("upper mmap: %w", err)
 	}
 
 	s := &Storage{
@@ -171,17 +219,21 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 		graphData: graphData,
 		vecFile:   vecFile,
 		vecData:   vecData,
+		upperFile: upperFile,
+		upperData: upperData,
 		config:    config,
 		layout:    layout,
 		vecLen:    config.Dims,
 	}
 
 	if graphInfo.Size() == 0 || s.readUint32(0) == 0 {
-		s.writeHeader(initialNodes)
+		s.writeHeader(initialNodes, uint32(upperMmapSize))
 	} else {
 		if err := s.validateHeader(); err != nil {
+			unix.Munmap(upperData)
 			unix.Munmap(vecData)
 			unix.Munmap(graphData)
+			upperFile.Close()
 			vecFile.Close()
 			graphFile.Close()
 			return nil, err
@@ -216,6 +268,15 @@ func (s *Storage) Close() error {
 		}
 		s.vecData = nil
 	}
+	if s.upperData != nil {
+		if err := unix.Msync(s.upperData, unix.MS_SYNC); err != nil {
+			errs = append(errs, err)
+		}
+		if err := unix.Munmap(s.upperData); err != nil {
+			errs = append(errs, err)
+		}
+		s.upperData = nil
+	}
 	if s.graphFile != nil {
 		if err := s.graphFile.Close(); err != nil {
 			errs = append(errs, err)
@@ -226,15 +287,20 @@ func (s *Storage) Close() error {
 			errs = append(errs, err)
 		}
 	}
+	if s.upperFile != nil {
+		if err := s.upperFile.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	if len(errs) > 0 {
 		return fmt.Errorf("close errors: %v", errs)
 	}
 	return nil
 }
 
-func (s *Storage) writeHeader(initialNodes uint32) {
+func (s *Storage) writeHeader(initialNodes, initialUpperSize uint32) {
 	copy(s.graphData[0:4], Magic)
-	s.writeUint32(4, 2)
+	s.writeUint32(4, 3)
 	s.writeUint32(8, s.config.Dims)
 	s.writeUint32(12, s.config.M)
 	s.writeUint32(16, s.config.MMax0)
@@ -242,6 +308,8 @@ func (s *Storage) writeHeader(initialNodes uint32) {
 	s.writeUint32(28, 0)
 	s.writeUint32(32, initialNodes)
 	s.writeUint32(36, 0)
+	s.writeUint32(40, initialUpperSize)
+	s.writeUint32(44, 4)
 }
 
 func (s *Storage) validateHeader() error {
@@ -250,7 +318,7 @@ func (s *Storage) validateHeader() error {
 		return fmt.Errorf("invalid hnsw file: bad magic %q", magic)
 	}
 	ver := s.readUint32(4)
-	if ver != 1 && ver != 2 {
+	if ver != 1 && ver != 2 && ver != 3 {
 		return fmt.Errorf("unsupported hnsw version: %d", ver)
 	}
 	if s.readUint32(8) != s.config.Dims {
@@ -297,14 +365,6 @@ func (s *Storage) getGraphNode(id uint32) []byte {
 	return s.graphData[offset:end]
 }
 
-func (s *Storage) ReadLock() {
-	s.mu.RLock()
-}
-
-func (s *Storage) ReadUnlock() {
-	s.mu.RUnlock()
-}
-
 func (s *Storage) GetVector(id uint32) []float32 {
 	vecOffset := uint64(id) * uint64(s.layout.VectorSize) / 4
 	end := vecOffset + uint64(s.config.Dims)
@@ -325,13 +385,22 @@ func (s *Storage) GetNeighbors(id uint32, layer int) []uint32 {
 		)
 		neighborsData = data[s.layout.L0NeighborsOffset : s.layout.L0NeighborsOffset+(s.config.MMax0*4)]
 	} else {
-		if layer > int(s.config.MaxLevel) {
-			panic("hnsw: layer out of bounds")
+		offset := binary.LittleEndian.Uint32(data[s.layout.UpperOffsetOffset : s.layout.UpperOffsetOffset+4])
+		if offset == 0 {
+			return nil
 		}
-		countsOffset := s.layout.UpperCountsOffset + uint32(layer-1)*4
-		count = int(binary.LittleEndian.Uint32(data[countsOffset : countsOffset+4]))
-		layerOffset := s.layout.UpperNeighborsOffset + uint32(layer-1)*s.config.M*4
-		neighborsData = data[layerOffset : layerOffset+(s.config.M*4)]
+		level := int(binary.LittleEndian.Uint32(data[s.layout.LevelOffset : s.layout.LevelOffset+4]))
+		if layer > level {
+			panic("hnsw: layer > node level")
+		}
+
+		// upperData layout: [L]counts, [L*M]neighbors
+		countsOffset := offset + uint32(layer-1)*4
+		count = int(binary.LittleEndian.Uint32(s.upperData[countsOffset : countsOffset+4]))
+
+		allCountsSize := uint32(level) * 4
+		layerNbOffset := offset + allCountsSize + uint32(layer-1)*s.config.M*4
+		neighborsData = s.upperData[layerNbOffset : layerNbOffset+(s.config.M*4)]
 	}
 
 	return unsafe.Slice((*uint32)(unsafe.Pointer(&neighborsData[0])), count)
@@ -339,23 +408,80 @@ func (s *Storage) GetNeighbors(id uint32, layer int) []uint32 {
 
 func (s *Storage) SetNeighbors(id uint32, layer int, neighbors []uint32) {
 	data := s.getGraphNode(id)
+	var neighborsData []byte
+
 	if layer == 0 {
 		binary.LittleEndian.PutUint32(
 			data[s.layout.L0CountOffset:s.layout.L0CountOffset+4],
 			uint32(len(neighbors)),
 		)
-		neighborsData := data[s.layout.L0NeighborsOffset : s.layout.L0NeighborsOffset+(s.config.MMax0*4)]
+		neighborsData = data[s.layout.L0NeighborsOffset : s.layout.L0NeighborsOffset+(s.config.MMax0*4)]
 		copy(unsafe.Slice((*uint32)(unsafe.Pointer(&neighborsData[0])), s.config.MMax0), neighbors)
 	} else {
-		if layer > int(s.config.MaxLevel) {
-			panic("hnsw: layer out of bounds")
+		offset := binary.LittleEndian.Uint32(data[s.layout.UpperOffsetOffset : s.layout.UpperOffsetOffset+4])
+		if offset == 0 {
+			panic("hnsw: setting upper neighbors on node with level 0")
 		}
-		countsOffset := s.layout.UpperCountsOffset + uint32(layer-1)*4
-		binary.LittleEndian.PutUint32(data[countsOffset:countsOffset+4], uint32(len(neighbors)))
-		layerOffset := s.layout.UpperNeighborsOffset + uint32(layer-1)*s.config.M*4
-		neighborsData := data[layerOffset : layerOffset+(s.config.M*4)]
+		level := int(binary.LittleEndian.Uint32(data[s.layout.LevelOffset : s.layout.LevelOffset+4]))
+		if layer > level {
+			panic("hnsw: layer > node level")
+		}
+
+		countsOffset := offset + uint32(layer-1)*4
+		binary.LittleEndian.PutUint32(s.upperData[countsOffset:countsOffset+4], uint32(len(neighbors)))
+
+		allCountsSize := uint32(level) * 4
+		layerNbOffset := offset + allCountsSize + uint32(layer-1)*s.config.M*4
+		neighborsData = s.upperData[layerNbOffset : layerNbOffset+(s.config.M*4)]
 		copy(unsafe.Slice((*uint32)(unsafe.Pointer(&neighborsData[0])), s.config.M), neighbors)
 	}
+}
+
+func (s *Storage) allocateUpper(id uint32, level int) error {
+	if level <= 0 {
+		return nil
+	}
+
+	size := uint32(level) * (1 + s.config.M) * 4
+	used := s.readUint32(44)
+	allocated := s.readUint32(40)
+
+	if used+size > allocated {
+		newAllocated := max(allocated*2, used+size+4096)
+		if err := s.growUpper(newAllocated); err != nil {
+			return err
+		}
+	}
+
+	offset := used
+	s.writeUint32(44, used+size)
+
+	data := s.getGraphNode(id)
+	binary.LittleEndian.PutUint32(data[s.layout.UpperOffsetOffset:s.layout.UpperOffsetOffset+4], offset)
+	return nil
+}
+
+func (s *Storage) growUpper(newAllocated uint32) error {
+	if err := s.upperFile.Truncate(int64(newAllocated)); err != nil {
+		return fmt.Errorf("upper truncate: %w", err)
+	}
+
+	upperData, err := unix.Mmap(
+		int(s.upperFile.Fd()), 0, int(newAllocated),
+		unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED,
+	)
+	if err != nil {
+		return fmt.Errorf("upper mmap: %w", err)
+	}
+
+	oldUpper := s.upperData
+	s.upperData = upperData
+	s.writeUint32(40, newAllocated)
+
+	if oldUpper != nil {
+		unix.Munmap(oldUpper)
+	}
+	return nil
 }
 
 func (s *Storage) LockNode(id uint32) {
@@ -391,9 +517,6 @@ func (s *Storage) addNode() (uint32, error) {
 }
 
 func (s *Storage) grow(newAllocated uint32) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	newGraphSize := uint64(HeaderSize) + uint64(newAllocated)*uint64(s.layout.GraphNodeSize)
 	newVecSize := uint64(newAllocated) * uint64(s.layout.VectorSize)
 

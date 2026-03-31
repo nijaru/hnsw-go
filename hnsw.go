@@ -147,12 +147,17 @@ type Index struct {
 	mMax0      int
 	efSearch   int
 	efConst    int
+	probes     int
 	pool       sync.Pool
 }
 
 func NewIndex(storage *Storage, distFunc DistanceFunc, efSearch, efConst int) *Index {
 	m := int(storage.config.M)
 	mMax0 := int(storage.config.MMax0)
+	probes := int(storage.config.Probes)
+	if probes <= 0 {
+		probes = 1
+	}
 	if efSearch <= 0 {
 		efSearch = 16
 	}
@@ -166,6 +171,7 @@ func NewIndex(storage *Storage, distFunc DistanceFunc, efSearch, efConst int) *I
 		mMax0:      mMax0,
 		efSearch:   efSearch,
 		efConst:    efConst,
+		probes:     probes,
 		maxLevel:   -1,
 		entryPoint: 0,
 	}
@@ -185,6 +191,15 @@ func NewIndex(storage *Storage, distFunc DistanceFunc, efSearch, efConst int) *I
 	idx.nodeCount = storage.readUint32(28)
 
 	return idx
+}
+
+func (idx *Index) SetProbes(probes int) {
+	idx.mu.Lock()
+	if probes <= 0 {
+		probes = 1
+	}
+	idx.probes = probes
+	idx.mu.Unlock()
 }
 
 func (idx *Index) SetEfSearch(ef int) {
@@ -214,6 +229,7 @@ type Stats struct {
 	MMax0      int
 	EfSearch   int
 	EfConst    int
+	Probes     int
 }
 
 func (idx *Index) Stats() Stats {
@@ -227,6 +243,7 @@ func (idx *Index) Stats() Stats {
 		MMax0:      idx.mMax0,
 		EfSearch:   idx.efSearch,
 		EfConst:    idx.efConst,
+		Probes:     idx.probes,
 	}
 }
 
@@ -244,8 +261,6 @@ func (idx *Index) Search(query []float32, k int) ([]Node, error) {
 
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
-	idx.storage.ReadLock()
-	defer idx.storage.ReadUnlock()
 
 	if idx.nodeCount == 0 {
 		return nil, nil
@@ -255,21 +270,63 @@ func (idx *Index) Search(query []float32, k int) ([]Node, error) {
 	currEntryPoint := idx.entryPoint
 	nodeCount := idx.nodeCount
 	efSearch := idx.efSearch
+	probes := idx.probes
 
-	currNode := currEntryPoint
-	currDist := idx.distFunc(query, idx.storage.GetVector(currNode))
+	var probeBuf [64]Node
+	probeNodes := probeBuf[:0]
+	currDist := idx.distFunc(query, idx.storage.GetVector(currEntryPoint))
+	probeNodes = append(probeNodes, Node{ID: currEntryPoint, Distance: currDist})
 
 	for level := currMaxLevel; level >= 1; level-- {
 		changed := true
 		for changed {
 			changed = false
-			neighbors := idx.storage.GetNeighbors(currNode, level)
+			// Greedy move from the best probe
+			best := probeNodes[0]
+			neighbors := idx.storage.GetNeighbors(best.ID, level)
 			for _, nb := range neighbors {
 				d := idx.distFunc(query, idx.storage.GetVector(nb))
-				if d < currDist {
-					currDist = d
-					currNode = nb
+				if d < best.Distance {
+					best.Distance = d
+					best.ID = nb
 					changed = true
+				}
+			}
+			if changed {
+				probeNodes[0] = best
+			}
+		}
+
+		if probes > 1 {
+			// Expand from the best node to find more entry points for the next layer
+			best := probeNodes[0]
+			neighbors := idx.storage.GetNeighbors(best.ID, level)
+			for _, nb := range neighbors {
+				d := idx.distFunc(query, idx.storage.GetVector(nb))
+				
+				// Check if already in probes
+				exists := false
+				for _, p := range probeNodes {
+					if p.ID == nb {
+						exists = true
+						break
+					}
+				}
+				if exists {
+					continue
+				}
+
+				if len(probeNodes) < probes {
+					probeNodes = append(probeNodes, Node{ID: nb, Distance: d})
+					// Sort by distance (simple insertion sort for small N)
+					for i := len(probeNodes) - 1; i > 0 && probeNodes[i].Distance < probeNodes[i-1].Distance; i-- {
+						probeNodes[i], probeNodes[i-1] = probeNodes[i-1], probeNodes[i]
+					}
+				} else if d < probeNodes[len(probeNodes)-1].Distance {
+					probeNodes[len(probeNodes)-1] = Node{ID: nb, Distance: d}
+					for i := len(probeNodes) - 1; i > 0 && probeNodes[i].Distance < probeNodes[i-1].Distance; i-- {
+						probeNodes[i], probeNodes[i-1] = probeNodes[i-1], probeNodes[i]
+					}
 				}
 			}
 		}
@@ -279,9 +336,14 @@ func (idx *Index) Search(query []float32, k int) ([]Node, error) {
 	defer idx.pool.Put(buf)
 	buf.reset(nodeCount)
 
-	buf.candidates.Push(Node{ID: currNode, Distance: currDist})
-	buf.results.Push(Node{ID: currNode, Distance: currDist})
-	buf.visit(currNode)
+	for _, p := range probeNodes {
+		buf.candidates.Push(p)
+		buf.results.Push(p)
+		if len(buf.results.Nodes) > efSearch {
+			buf.results.Pop()
+		}
+		buf.visit(p.ID)
+	}
 
 	for len(buf.candidates.Nodes) > 0 {
 		c := buf.candidates.Pop()
@@ -346,17 +408,30 @@ func (idx *Index) Insert(vec []float32) error {
 		idx.storage.writeUint32(24, id)
 		idx.storage.writeUint32(36, uint32(level))
 		idx.storage.setLevel(id, level)
+		if err := idx.storage.allocateUpper(id, level); err != nil {
+			idx.mu.Unlock()
+			return err
+		}
 		idx.storage.setVector(id, vec)
 		idx.mu.Unlock()
 		return nil
 	}
 
+	idx.storage.setLevel(id, level)
+	if err := idx.storage.allocateUpper(id, level); err != nil {
+		idx.mu.Unlock()
+		return err
+	}
+	idx.storage.setVector(id, vec)
+
 	currEntryPoint := idx.entryPoint
 	currMaxLevel := idx.maxLevel
 	efConst := idx.efConst
 	nodeCount := idx.nodeCount
-	idx.storage.ReadLock()
 	idx.mu.Unlock()
+
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
 
 	currNode := currEntryPoint
 	currDist := idx.distFunc(vec, idx.storage.GetVector(currNode))
@@ -376,9 +451,6 @@ func (idx *Index) Insert(vec []float32) error {
 			}
 		}
 	}
-
-	idx.storage.setLevel(id, level)
-	idx.storage.setVector(id, vec)
 
 	insertBuf := idx.pool.Get().(*searchBuffer)
 	defer idx.pool.Put(insertBuf)
