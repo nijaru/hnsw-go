@@ -75,6 +75,21 @@ func TestDelete(t *testing.T) {
 			t.Errorf("found deleted node ID 0 in search results")
 		}
 	}
+
+	// Verify graph healing: neighbors of deleted nodes should no longer point to them
+	for i := uint32(0); i < 10; i++ {
+		if i == 5 || i == 0 {
+			continue // These were deleted
+		}
+		for l := 0; l <= idx.storage.GetMaxLevel(i); l++ {
+			nb := idx.storage.GetNeighbors(i, l)
+			for _, nID := range nb {
+				if nID == 5 || nID == 0 {
+					t.Errorf("node %d still has deleted node %d as neighbor at level %d", i, nID, l)
+				}
+			}
+		}
+	}
 }
 
 func TestHNSW(t *testing.T) {

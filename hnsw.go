@@ -600,8 +600,92 @@ func (idx *Index) Delete(id uint32) error {
 	if id >= idx.nodeCount {
 		return fmt.Errorf("hnsw: delete id %d out of bounds", id)
 	}
+	if idx.storage.IsDeleted(id) {
+		return nil
+	}
+
+	// Heal graph connectivity before marking as deleted.
+	// We do this by connecting neighbors of the deleted node to each other.
+	idx.repairNeighborConnection(id)
+
 	idx.storage.SetDeleted(id, true)
 	return nil
+}
+
+func (idx *Index) repairNeighborConnection(id uint32) {
+	maxL := idx.storage.GetMaxLevel(id)
+	for level := 0; level <= maxL; level++ {
+		neighbors := idx.storage.GetNeighbors(id, level)
+		if len(neighbors) == 0 {
+			continue
+		}
+
+		// N2 is the set of points that have 'id' as a neighbor
+		var n2 []uint32
+		for _, v := range neighbors {
+			vNb := idx.storage.GetNeighbors(v, level)
+			hasID := false
+			for _, nbID := range vNb {
+				if nbID == id {
+					hasID = true
+					break
+				}
+			}
+			if hasID {
+				n2 = append(n2, v)
+			}
+		}
+
+		// For each u in N2, re-select neighbors from {u's neighbors} + {id's neighbors} - {id}
+		for _, u := range n2 {
+			uNb := idx.storage.GetNeighbors(u, level)
+			
+			// Build candidate set for u
+			candidates := make([]Node, 0, len(uNb)+len(neighbors))
+			uVec := idx.storage.GetVector(u)
+			
+			seen := make(map[uint32]bool)
+			seen[id] = true // Exclude the deleted node
+			seen[u] = true  // Exclude self
+
+			// Add u's current neighbors (except id)
+			for _, nbID := range uNb {
+				if !seen[nbID] {
+					d := idx.distFunc(uVec, idx.storage.GetVector(nbID))
+					candidates = append(candidates, Node{ID: nbID, Distance: d})
+					seen[nbID] = true
+				}
+			}
+			// Add id's neighbors
+			for _, nbID := range neighbors {
+				if !seen[nbID] {
+					d := idx.distFunc(uVec, idx.storage.GetVector(nbID))
+					candidates = append(candidates, Node{ID: nbID, Distance: d})
+					seen[nbID] = true
+				}
+			}
+
+			// Prune using the standard heuristic
+			limit := idx.storage.config.M
+			if level == 0 {
+				limit = idx.storage.config.MMax0
+			}
+			
+			// selectNeighbors expects candidates sorted by distance
+			slices.SortFunc(candidates, func(a, b Node) int {
+				if a.Distance < b.Distance {
+					return -1
+				}
+				if a.Distance > b.Distance {
+					return 1
+				}
+				return 0
+			})
+
+			newNb := idx.selectNeighbors(candidates, int(limit))
+			idx.storage.SetNeighbors(u, level, newNb)
+		}
+	}
 }
 
 func (idx *Index) Sync() error {

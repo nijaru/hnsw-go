@@ -463,7 +463,7 @@ func (s *Storage) growDeleted(newSize uint32) error {
 
 func (s *Storage) writeHeader(initialNodes, initialUpperSize uint32) {
 	copy(s.graphData[0:4], Magic)
-	s.writeUint32(4, 3)
+	s.writeUint32(4, 4)
 	s.writeUint32(8, s.config.Dims)
 	s.writeUint32(12, s.config.M)
 	s.writeUint32(16, s.config.MMax0)
@@ -482,7 +482,7 @@ func (s *Storage) validateHeader() error {
 		return fmt.Errorf("invalid hnsw file: bad magic %q", magic)
 	}
 	ver := s.readUint32(4)
-	if ver != 1 && ver != 2 && ver != 3 {
+	if ver != 1 && ver != 2 && ver != 3 && ver != 4 {
 		return fmt.Errorf("unsupported hnsw version: %d", ver)
 	}
 	if s.readUint32(8) != s.config.Dims {
@@ -512,12 +512,21 @@ func (s *Storage) validateHeader() error {
 	return nil
 }
 
-func (s *Storage) readUint32(offset uint32) uint32 {
+func (s *Storage) readUint32(offset uint64) uint32 {
 	return binary.LittleEndian.Uint32(s.graphData[offset : offset+4])
 }
 
-func (s *Storage) writeUint32(offset uint32, val uint32) {
+func (s *Storage) writeUint32(offset uint64, val uint32) {
 	binary.LittleEndian.PutUint32(s.graphData[offset:offset+4], val)
+}
+
+func (s *Storage) writeUint32Upper(offset uint64, val uint32) {
+	binary.LittleEndian.PutUint32(s.upperData[offset:offset+4], val)
+}
+
+func (s *Storage) GetMaxLevel(id uint32) int {
+	offset := uint64(HeaderSize) + uint64(id)*uint64(s.layout.GraphNodeSize)
+	return int(s.readUint32(offset))
 }
 
 func (s *Storage) getGraphNode(id uint32) []byte {
