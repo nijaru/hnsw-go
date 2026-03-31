@@ -391,18 +391,80 @@ func (idx *Index) Insert(vec []float32) error {
 			idx.storage.config.Dims,
 		)
 	}
+	return idx.BatchInsert([][]float32{vec})
+}
 
+func (idx *Index) BatchInsert(vecs [][]float32) error {
+	if len(vecs) == 0 {
+		return nil
+	}
+
+	dims := int(idx.storage.config.Dims)
+	for i, vec := range vecs {
+		if len(vec) != dims {
+			return fmt.Errorf("hnsw: vector %d dims %d != index dims %d", i, len(vec), dims)
+		}
+	}
+
+	// 1. Pre-allocate all IDs and grow storage once
+	idx.mu.Lock()
+	startID := idx.nodeCount
+	numVecs := uint32(len(vecs))
+	
+	// Ensure storage has enough capacity
+	allocated := idx.storage.readUint32(32)
+	if startID+numVecs > allocated {
+		newAllocated := max(allocated*2, startID+numVecs+1000)
+		if err := idx.storage.grow(newAllocated); err != nil {
+			idx.mu.Unlock()
+			return err
+		}
+	}
+	
+	idx.nodeCount += numVecs
+	idx.storage.writeUint32(28, idx.nodeCount)
+	idx.mu.Unlock()
+
+	// 2. Perform inserts in parallel
+	numWorkers := min(len(vecs), 16) // Heuristic
+	jobs := make(chan int, len(vecs))
+	errs := make(chan error, numWorkers)
+	var wg sync.WaitGroup
+
+	for w := 0; w < numWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				id := startID + uint32(i)
+				if err := idx.insert(id, vecs[i]); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}()
+	}
+
+	for i := range vecs {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+
+	select {
+	case err := <-errs:
+		return err
+	default:
+	}
+
+	return nil
+}
+
+func (idx *Index) insert(id uint32, vec []float32) error {
 	level := idx.randomLevel()
 
-	idx.mu.Lock()
-	id, err := idx.storage.addNode()
-	if err != nil {
-		idx.mu.Unlock()
-		return err
-	}
-	idx.nodeCount = id + 1
-
 	if id == 0 {
+		idx.mu.Lock()
 		idx.entryPoint = id
 		idx.maxLevel = level
 		idx.storage.writeUint32(24, id)
@@ -419,19 +481,15 @@ func (idx *Index) Insert(vec []float32) error {
 
 	idx.storage.setLevel(id, level)
 	if err := idx.storage.allocateUpper(id, level); err != nil {
-		idx.mu.Unlock()
 		return err
 	}
 	idx.storage.setVector(id, vec)
 
+	idx.mu.RLock()
 	currEntryPoint := idx.entryPoint
 	currMaxLevel := idx.maxLevel
 	efConst := idx.efConst
 	nodeCount := idx.nodeCount
-	idx.mu.Unlock()
-
-	idx.mu.RLock()
-	defer idx.mu.RUnlock()
 
 	currNode := currEntryPoint
 	currDist := idx.distFunc(vec, idx.storage.GetVector(currNode))
@@ -489,8 +547,7 @@ func (idx *Index) Insert(vec []float32) error {
 			idx.storage.UnlockNode(nb)
 		}
 	}
-
-	idx.storage.ReadUnlock()
+	idx.mu.RUnlock()
 
 	if level > currMaxLevel {
 		idx.mu.Lock()

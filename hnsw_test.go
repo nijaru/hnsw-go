@@ -482,6 +482,50 @@ func TestConcurrentInsertSearch(t *testing.T) {
 	t.Logf("Concurrent test passed: %d nodes, final search OK", stats.NodeCount)
 }
 
+func TestBatchInsert(t *testing.T) {
+	path := "test_batch.hnsw"
+	defer removeTestFiles(path)
+
+	config := IndexConfig{
+		Dims:     128,
+		M:        16,
+		MMax0:    32,
+		MaxLevel: 16,
+	}
+
+	storage, err := NewStorage(path, config, 10)
+	if err != nil {
+		t.Fatalf("failed to create storage: %v", err)
+	}
+	defer storage.Close()
+
+	idx := NewIndex(storage, L2, 50, 50)
+
+	vectors := make([][]float32, 100)
+	for i := range vectors {
+		vectors[i] = make([]float32, 128)
+		for j := range vectors[i] {
+			vectors[i][j] = rand.Float32()
+		}
+	}
+
+	if err := idx.BatchInsert(vectors); err != nil {
+		t.Fatalf("BatchInsert failed: %v", err)
+	}
+
+	if idx.Len() != 100 {
+		t.Errorf("expected 100 nodes, got %d", idx.Len())
+	}
+
+	results, err := idx.Search(vectors[0], 1)
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	if len(results) == 0 || results[0].ID != 0 {
+		t.Errorf("expected result ID 0, got %v", results)
+	}
+}
+
 func TestMultiProbe(t *testing.T) {
 	path := "test_multiprobe.hnsw"
 	defer removeTestFiles(path)
