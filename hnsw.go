@@ -245,7 +245,10 @@ func (idx *Index) Search(query []float32, k int) ([]Node, error) {
 	}
 
 	for len(buf.results.Nodes) > 0 {
-		buf.out = append(buf.out, buf.results.Pop())
+		n := buf.results.Pop()
+		if !idx.storage.IsDeleted(n.ID) {
+			buf.out = append(buf.out, n)
+		}
 	}
 	slices.Reverse(buf.out)
 
@@ -589,4 +592,26 @@ func (idx *Index) shrinkNeighbors(neighbors []uint32, vec []float32, limit int) 
 	}
 
 	return idx.selectNeighbors(sorted, limit)
+}
+
+func (idx *Index) Delete(id uint32) error {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	if id >= idx.nodeCount {
+		return fmt.Errorf("hnsw: delete id %d out of bounds", id)
+	}
+	idx.storage.SetDeleted(id, true)
+	return nil
+}
+
+func (idx *Index) Sync() error {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	return idx.storage.Sync()
+}
+
+func (idx *Index) Close() error {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	return idx.storage.Close()
 }

@@ -70,6 +70,8 @@ type Storage struct {
 	vecData     []byte
 	upperFile   *os.File
 	upperData   []byte
+	delFile     *os.File
+	delData     []byte
 	config      IndexConfig
 	layout      NodeLayout
 	vectorSlice []float32
@@ -100,6 +102,10 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 	if upperSize < 4096 {
 		upperSize = 4096
 	}
+	delSize := uint64((initialNodes + 7) / 8)
+	if delSize < 4096 {
+		delSize = 4096
+	}
 
 	graphFile, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o666)
 	if err != nil {
@@ -121,8 +127,18 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 		return nil, fmt.Errorf("upper file: %w", err)
 	}
 
+	delPath := path + ".del"
+	delFile, err := os.OpenFile(delPath, os.O_RDWR|os.O_CREATE, 0o666)
+	if err != nil {
+		upperFile.Close()
+		vecFile.Close()
+		graphFile.Close()
+		return nil, fmt.Errorf("deleted file: %w", err)
+	}
+
 	graphInfo, err := graphFile.Stat()
 	if err != nil {
+		delFile.Close()
 		upperFile.Close()
 		vecFile.Close()
 		graphFile.Close()
@@ -131,6 +147,7 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 
 	vecInfo, err := vecFile.Stat()
 	if err != nil {
+		delFile.Close()
 		upperFile.Close()
 		vecFile.Close()
 		graphFile.Close()
@@ -139,6 +156,16 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 
 	upperInfo, err := upperFile.Stat()
 	if err != nil {
+		delFile.Close()
+		upperFile.Close()
+		vecFile.Close()
+		graphFile.Close()
+		return nil, err
+	}
+
+	delInfo, err := delFile.Stat()
+	if err != nil {
+		delFile.Close()
 		upperFile.Close()
 		vecFile.Close()
 		graphFile.Close()
@@ -148,6 +175,7 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 	graphMmapSize := max(int(graphInfo.Size()), int(graphSize))
 	if graphInfo.Size() < int64(graphSize) {
 		if err := graphFile.Truncate(int64(graphSize)); err != nil {
+			delFile.Close()
 			upperFile.Close()
 			vecFile.Close()
 			graphFile.Close()
@@ -159,6 +187,7 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 	vecMmapSize := max(int(vecInfo.Size()), int(vecSize))
 	if vecInfo.Size() < int64(vecSize) {
 		if err := vecFile.Truncate(int64(vecSize)); err != nil {
+			delFile.Close()
 			upperFile.Close()
 			vecFile.Close()
 			graphFile.Close()
@@ -170,6 +199,7 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 	upperMmapSize := max(int(upperInfo.Size()), int(upperSize))
 	if upperInfo.Size() < int64(upperSize) {
 		if err := upperFile.Truncate(int64(upperSize)); err != nil {
+			delFile.Close()
 			upperFile.Close()
 			vecFile.Close()
 			graphFile.Close()
@@ -178,11 +208,24 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 		upperMmapSize = int(upperSize)
 	}
 
+	delMmapSize := max(int(delInfo.Size()), int(delSize))
+	if delInfo.Size() < int64(delSize) {
+		if err := delFile.Truncate(int64(delSize)); err != nil {
+			delFile.Close()
+			upperFile.Close()
+			vecFile.Close()
+			graphFile.Close()
+			return nil, fmt.Errorf("deleted truncate: %w", err)
+		}
+		delMmapSize = int(delSize)
+	}
+
 	graphData, err := unix.Mmap(
 		int(graphFile.Fd()), 0, graphMmapSize,
 		unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED,
 	)
 	if err != nil {
+		delFile.Close()
 		upperFile.Close()
 		vecFile.Close()
 		graphFile.Close()
@@ -195,6 +238,7 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 	)
 	if err != nil {
 		unix.Munmap(graphData)
+		delFile.Close()
 		upperFile.Close()
 		vecFile.Close()
 		graphFile.Close()
@@ -208,10 +252,26 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 	if err != nil {
 		unix.Munmap(vecData)
 		unix.Munmap(graphData)
+		delFile.Close()
 		upperFile.Close()
 		vecFile.Close()
 		graphFile.Close()
 		return nil, fmt.Errorf("upper mmap: %w", err)
+	}
+
+	delData, err := unix.Mmap(
+		int(delFile.Fd()), 0, delMmapSize,
+		unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED,
+	)
+	if err != nil {
+		unix.Munmap(upperData)
+		unix.Munmap(vecData)
+		unix.Munmap(graphData)
+		delFile.Close()
+		upperFile.Close()
+		vecFile.Close()
+		graphFile.Close()
+		return nil, fmt.Errorf("deleted mmap: %w", err)
 	}
 
 	s := &Storage{
@@ -221,6 +281,8 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 		vecData:   vecData,
 		upperFile: upperFile,
 		upperData: upperData,
+		delFile:   delFile,
+		delData:   delData,
 		config:    config,
 		layout:    layout,
 		vecLen:    config.Dims,
@@ -230,9 +292,11 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 		s.writeHeader(initialNodes, uint32(upperMmapSize))
 	} else {
 		if err := s.validateHeader(); err != nil {
+			unix.Munmap(delData)
 			unix.Munmap(upperData)
 			unix.Munmap(vecData)
 			unix.Munmap(graphData)
+			delFile.Close()
 			upperFile.Close()
 			vecFile.Close()
 			graphFile.Close()
@@ -246,6 +310,34 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 	)
 
 	return s, nil
+}
+
+func (s *Storage) Sync() error {
+	var errs []error
+	if s.graphData != nil {
+		if err := unix.Msync(s.graphData, unix.MS_SYNC); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if s.vecData != nil {
+		if err := unix.Msync(s.vecData, unix.MS_SYNC); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if s.upperData != nil {
+		if err := unix.Msync(s.upperData, unix.MS_SYNC); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if s.delData != nil {
+		if err := unix.Msync(s.delData, unix.MS_SYNC); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("sync errors: %v", errs)
+	}
+	return nil
 }
 
 func (s *Storage) Close() error {
@@ -277,6 +369,15 @@ func (s *Storage) Close() error {
 		}
 		s.upperData = nil
 	}
+	if s.delData != nil {
+		if err := unix.Msync(s.delData, unix.MS_SYNC); err != nil {
+			errs = append(errs, err)
+		}
+		if err := unix.Munmap(s.delData); err != nil {
+			errs = append(errs, err)
+		}
+		s.delData = nil
+	}
 	if s.graphFile != nil {
 		if err := s.graphFile.Close(); err != nil {
 			errs = append(errs, err)
@@ -292,8 +393,70 @@ func (s *Storage) Close() error {
 			errs = append(errs, err)
 		}
 	}
+	if s.delFile != nil {
+		if err := s.delFile.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	if len(errs) > 0 {
 		return fmt.Errorf("close errors: %v", errs)
+	}
+	return nil
+}
+
+func (s *Storage) IsDeleted(id uint32) bool {
+	byteIdx := id / 8
+	if int(byteIdx) >= len(s.delData) {
+		return false
+	}
+	bitIdx := id % 8
+	return (s.delData[byteIdx] & (1 << bitIdx)) != 0
+}
+
+func (s *Storage) SetDeleted(id uint32, deleted bool) {
+	byteIdx := id / 8
+	if int(byteIdx) >= len(s.delData) {
+		if !deleted {
+			return
+		}
+		newSize := max(uint32(len(s.delData)*2), (id/8 + 4096) &^ 4095)
+		if err := s.growDeleted(newSize); err != nil {
+			panic(err)
+		}
+	}
+	bitIdx := id % 8
+	if deleted {
+		if (s.delData[byteIdx] & (1 << bitIdx)) == 0 {
+			s.delData[byteIdx] |= (1 << bitIdx)
+			count := s.readUint32(48)
+			s.writeUint32(48, count+1)
+		}
+	} else {
+		if (s.delData[byteIdx] & (1 << bitIdx)) != 0 {
+			s.delData[byteIdx] &^= (1 << bitIdx)
+			count := s.readUint32(48)
+			if count > 0 {
+				s.writeUint32(48, count-1)
+			}
+		}
+	}
+}
+
+func (s *Storage) growDeleted(newSize uint32) error {
+	if err := s.delFile.Truncate(int64(newSize)); err != nil {
+		return fmt.Errorf("deleted truncate: %w", err)
+	}
+	delData, err := unix.Mmap(
+		int(s.delFile.Fd()), 0, int(newSize),
+		unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED,
+	)
+	if err != nil {
+		return fmt.Errorf("deleted mmap: %w", err)
+	}
+	oldDel := s.delData
+	s.delData = delData
+	if oldDel != nil {
+		unix.Munmap(oldDel)
 	}
 	return nil
 }
@@ -310,6 +473,7 @@ func (s *Storage) writeHeader(initialNodes, initialUpperSize uint32) {
 	s.writeUint32(36, 0)
 	s.writeUint32(40, initialUpperSize)
 	s.writeUint32(44, 4)
+	s.writeUint32(48, 0)
 }
 
 func (s *Storage) validateHeader() error {

@@ -12,6 +12,69 @@ func removeTestFiles(path string) {
 	os.Remove(path)
 	os.Remove(path + ".vec")
 	os.Remove(path + ".upper")
+	os.Remove(path + ".del")
+}
+
+func TestDelete(t *testing.T) {
+	path := "test_delete.hnsw"
+	defer removeTestFiles(path)
+
+	config := IndexConfig{
+		Dims:     128,
+		M:        16,
+		MMax0:    32,
+		MaxLevel: 16,
+	}
+
+	storage, err := NewStorage(path, config, 10)
+	if err != nil {
+		t.Fatalf("failed to create storage: %v", err)
+	}
+	defer storage.Close()
+
+	idx := NewIndex(storage, L2, 50, 50)
+
+	// Insert 10 vectors
+	vectors := make([][]float32, 10)
+	for i := range vectors {
+		vectors[i] = make([]float32, 128)
+		vectors[i][0] = float32(i) // Make them distinct
+		idx.Insert(vectors[i])
+	}
+
+	// Delete ID 5
+	if err := idx.Delete(5); err != nil {
+		t.Fatalf("Delete failed: %v", err)
+	}
+
+	// Search for vector that was at ID 5
+	query := make([]float32, 128)
+	query[0] = 5.0
+	results, err := idx.Search(query, 5)
+	if err != nil {
+		t.Fatalf("Search failed: %v", err)
+	}
+
+	for _, res := range results {
+		if res.ID == 5 {
+			t.Errorf("found deleted node ID 5 in search results")
+		}
+	}
+
+	// Delete ID 0 (entry point)
+	if err := idx.Delete(0); err != nil {
+		t.Fatalf("Delete ID 0 failed: %v", err)
+	}
+
+	results, err = idx.Search(query, 5)
+	if err != nil {
+		t.Fatalf("Search after delete ID 0 failed: %v", err)
+	}
+	for _, res := range results {
+		if res.ID == 0 {
+			t.Errorf("found deleted node ID 0 in search results")
+		}
+	}
 }
 
 func TestHNSW(t *testing.T) {
