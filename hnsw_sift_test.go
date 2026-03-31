@@ -122,7 +122,7 @@ func TestSIFT10kRecall(t *testing.T) {
 
 	t.Logf("Inserting %d vectors...", len(vectors))
 	for i, vec := range vectors {
-		if err := idx.Insert(vec); err != nil {
+		if err := idx.Insert(vec, nil); err != nil {
 			t.Fatalf("insert %d: %v", i, err)
 		}
 	}
@@ -230,7 +230,7 @@ func TestSIFT10kRecallDistribution(t *testing.T) {
 
 	idx := NewIndex(storage, L2, 200, 200)
 	for i, vec := range vectors {
-		if err := idx.Insert(vec); err != nil {
+		if err := idx.Insert(vec, nil); err != nil {
 			t.Fatalf("insert %d: %v", i, err)
 		}
 	}
@@ -286,7 +286,7 @@ func TestSIFT10kSearchVsBruteForce(t *testing.T) {
 
 	idx := NewIndex(storage, L2, 200, 200)
 	for i, vec := range vectors {
-		if err := idx.Insert(vec); err != nil {
+		if err := idx.Insert(vec, nil); err != nil {
 			t.Fatalf("insert %d: %v", i, err)
 		}
 	}
@@ -364,7 +364,7 @@ func TestSIFT10kPersistence(t *testing.T) {
 
 		idx := NewIndex(storage, L2, 100, 100)
 		for i, vec := range vectors {
-			if err := idx.Insert(vec); err != nil {
+			if err := idx.Insert(vec, nil); err != nil {
 				t.Fatalf("insert %d: %v", i, err)
 			}
 		}

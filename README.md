@@ -36,10 +36,13 @@ func main() {
 
     idx := hnsw.NewIndex(storage, hnsw.L2, 200, 200)
 
-    idx.Insert(vec)
+    // Insert with optional metadata
+    meta := []byte("{\"text\": \"hello world\"}")
+    idx.Insert(vec, meta)
+
     results, _ := idx.Search(query, 10)
     for _, r := range results {
-        fmt.Printf("ID=%d Distance=%f\n", r.ID, r.Distance)
+        fmt.Printf("ID=%d Distance=%f Meta=%s\n", r.ID, r.Distance, string(r.Metadata))
     }
 }
 ```
@@ -62,8 +65,9 @@ type IndexConfig struct {
 | Method | Description |
 |--------|-------------|
 | `NewIndex(storage, distFunc, efSearch, efConst)` | Create index from storage. efSearch defaults to 16, efConst to 200. |
-| `Insert(vec)` error | Insert a vector |
-| `Search(query, k)` ([]Node, error) | Search for k nearest neighbors |
+| `Insert(vec, meta)` error | Insert a vector with optional metadata |
+| `BatchInsert(vecs, metas)` error | Insert multiple vectors/metas in parallel |
+| `Search(query, k)` ([]Node, error) | Search for k nearest neighbors (returns ID, Distance, and Metadata) |
 | `SetEfSearch(ef)` | Adjust search effort at runtime |
 | `SetEfConst(ef)` | Adjust construction effort at runtime |
 | `Len()` int | Number of indexed vectors |

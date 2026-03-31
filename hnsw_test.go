@@ -13,6 +13,7 @@ func removeTestFiles(path string) {
 	os.Remove(path + ".vec")
 	os.Remove(path + ".upper")
 	os.Remove(path + ".del")
+	os.Remove(path + ".meta")
 }
 
 func TestDelete(t *testing.T) {
@@ -39,7 +40,7 @@ func TestDelete(t *testing.T) {
 	for i := range vectors {
 		vectors[i] = make([]float32, 128)
 		vectors[i][0] = float32(i) // Make them distinct
-		idx.Insert(vectors[i])
+		idx.Insert(vectors[i], nil)
 	}
 
 	// Delete ID 5
@@ -117,7 +118,7 @@ func TestHNSW(t *testing.T) {
 		for j := range vectors[i] {
 			vectors[i][j] = rand.Float32()
 		}
-		if err := idx.Insert(vectors[i]); err != nil {
+		if err := idx.Insert(vectors[i], nil); err != nil {
 			t.Fatalf("failed to insert vector %d: %v", i, err)
 		}
 	}
@@ -189,7 +190,7 @@ func TestGrowTriggered(t *testing.T) {
 		for j := range vec {
 			vec[j] = rand.Float32()
 		}
-		if err := idx.Insert(vec); err != nil {
+		if err := idx.Insert(vec, nil); err != nil {
 			t.Fatalf("insert %d: %v", i, err)
 		}
 	}
@@ -262,7 +263,7 @@ func TestSearchKZero(t *testing.T) {
 	for j := range vec {
 		vec[j] = rand.Float32()
 	}
-	idx.Insert(vec)
+	idx.Insert(vec, nil)
 
 	results, err := idx.Search(make([]float32, 4), 0)
 	if err != nil {
@@ -297,7 +298,7 @@ func TestSearchKGreaterThanNodeCount(t *testing.T) {
 		for j := range vec {
 			vec[j] = rand.Float32()
 		}
-		idx.Insert(vec)
+		idx.Insert(vec, nil)
 	}
 
 	results, err := idx.Search(make([]float32, 4), 100)
@@ -328,7 +329,7 @@ func TestWrongDimensions(t *testing.T) {
 
 	idx := NewIndex(storage, L2, 10, 10)
 
-	err = idx.Insert(make([]float32, 8))
+	err = idx.Insert(make([]float32, 8), nil)
 	if err == nil {
 		t.Fatal("expected error for wrong dims in Insert")
 	}
@@ -388,7 +389,7 @@ func TestCosineDistance(t *testing.T) {
 		{0, 0, 1, 0},
 	}
 	for _, v := range vecs {
-		if err := idx.Insert(v); err != nil {
+		if err := idx.Insert(v, nil); err != nil {
 			t.Fatalf("insert: %v", err)
 		}
 	}
@@ -435,7 +436,7 @@ func TestDotDistance(t *testing.T) {
 		{0, 0, 1, 0},
 	}
 	for _, v := range vecs {
-		if err := idx.Insert(v); err != nil {
+		if err := idx.Insert(v, nil); err != nil {
 			t.Fatalf("insert: %v", err)
 		}
 	}
@@ -480,7 +481,7 @@ func TestConcurrentInsertSearch(t *testing.T) {
 		for j := range vec {
 			vec[j] = rand.Float32()
 		}
-		if err := idx.Insert(vec); err != nil {
+		if err := idx.Insert(vec, nil); err != nil {
 			t.Fatalf("seed insert %d: %v", i, err)
 		}
 	}
@@ -523,7 +524,7 @@ func TestConcurrentInsertSearch(t *testing.T) {
 				for j := range vec {
 					vec[j] = rand.Float32()
 				}
-				if err := idx.Insert(vec); err != nil {
+				if err := idx.Insert(vec, nil); err != nil {
 					insertErrs.Add(1)
 					return
 				}
@@ -587,7 +588,7 @@ func TestBatchInsert(t *testing.T) {
 		}
 	}
 
-	if err := idx.BatchInsert(vectors); err != nil {
+	if err := idx.BatchInsert(vectors, nil); err != nil {
 		t.Fatalf("BatchInsert failed: %v", err)
 	}
 
@@ -629,7 +630,7 @@ func TestMultiProbe(t *testing.T) {
 		for j := range vec {
 			vec[j] = rand.Float32()
 		}
-		idx.Insert(vec)
+		idx.Insert(vec, nil)
 	}
 
 	query := make([]float32, 128)
@@ -681,7 +682,7 @@ func TestPersistence(t *testing.T) {
 
 		idx := NewIndex(storage, L2, 20, 20)
 		for _, v := range vecs {
-			if err := idx.Insert(v); err != nil {
+			if err := idx.Insert(v, nil); err != nil {
 				t.Fatalf("insert: %v", err)
 			}
 		}

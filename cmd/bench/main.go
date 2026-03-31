@@ -76,7 +76,7 @@ func benchmarkBuild(vectors [][]float32) {
 
 		start := time.Now()
 		for _, vec := range vectors {
-			if err := idx.Insert(vec); err != nil {
+			if err := idx.Insert(vec, nil); err != nil {
 				panic(err)
 			}
 		}
@@ -129,7 +129,7 @@ func benchmarkSearch(vectors, queries [][]float32, gt [][]int32) {
 
 	idx := hnsw.NewIndex(storage, hnsw.L2, EfSearch, 200)
 	for _, vec := range vectors {
-		if err := idx.Insert(vec); err != nil {
+		if err := idx.Insert(vec, nil); err != nil {
 			panic(err)
 		}
 	}

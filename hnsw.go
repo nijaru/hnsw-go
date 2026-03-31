@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
+	"os"
 	"slices"
 	"sync"
 )
@@ -175,7 +176,7 @@ func (idx *Index) Search(query []float32, k int) ([]Node, error) {
 			neighbors := idx.storage.GetNeighbors(best.ID, level)
 			for _, nb := range neighbors {
 				d := idx.distFunc(query, idx.storage.GetVector(nb))
-				
+
 				// Check if already in probes
 				exists := false
 				for _, p := range probeNodes {
@@ -247,6 +248,8 @@ func (idx *Index) Search(query []float32, k int) ([]Node, error) {
 	for len(buf.results.Nodes) > 0 {
 		n := buf.results.Pop()
 		if !idx.storage.IsDeleted(n.ID) {
+			// Fetch metadata only for the results
+			n.Metadata = idx.storage.GetMetadata(n.ID)
 			buf.out = append(buf.out, n)
 		}
 	}
@@ -258,7 +261,7 @@ func (idx *Index) Search(query []float32, k int) ([]Node, error) {
 	return res, nil
 }
 
-func (idx *Index) Insert(vec []float32) error {
+func (idx *Index) Insert(vec []float32, meta []byte) error {
 	if len(vec) != int(idx.storage.config.Dims) {
 		return fmt.Errorf(
 			"hnsw: vector dims %d != index dims %d",
@@ -266,10 +269,10 @@ func (idx *Index) Insert(vec []float32) error {
 			idx.storage.config.Dims,
 		)
 	}
-	return idx.BatchInsert([][]float32{vec})
+	return idx.BatchInsert([][]float32{vec}, [][]byte{meta})
 }
 
-func (idx *Index) BatchInsert(vecs [][]float32) error {
+func (idx *Index) BatchInsert(vecs [][]float32, metas [][]byte) error {
 	if len(vecs) == 0 {
 		return nil
 	}
@@ -285,7 +288,7 @@ func (idx *Index) BatchInsert(vecs [][]float32) error {
 	idx.mu.Lock()
 	startID := idx.nodeCount
 	numVecs := uint32(len(vecs))
-	
+
 	// Ensure storage has enough capacity
 	allocated := idx.storage.readUint32(32)
 	if startID+numVecs > allocated {
@@ -295,7 +298,7 @@ func (idx *Index) BatchInsert(vecs [][]float32) error {
 			return err
 		}
 	}
-	
+
 	idx.nodeCount += numVecs
 	idx.storage.writeUint32(28, idx.nodeCount)
 	idx.mu.Unlock()
@@ -312,7 +315,11 @@ func (idx *Index) BatchInsert(vecs [][]float32) error {
 			defer wg.Done()
 			for i := range jobs {
 				id := startID + uint32(i)
-				if err := idx.insert(id, vecs[i]); err != nil {
+				var m []byte
+				if metas != nil && i < len(metas) {
+					m = metas[i]
+				}
+				if err := idx.insert(id, vecs[i], m); err != nil {
 					errs <- err
 					return
 				}
@@ -335,7 +342,7 @@ func (idx *Index) BatchInsert(vecs [][]float32) error {
 	return nil
 }
 
-func (idx *Index) insert(id uint32, vec []float32) error {
+func (idx *Index) insert(id uint32, vec []float32, meta []byte) error {
 	level := idx.randomLevel()
 
 	if id == 0 {
@@ -350,6 +357,10 @@ func (idx *Index) insert(id uint32, vec []float32) error {
 			return err
 		}
 		idx.storage.setVector(id, vec)
+		if err := idx.storage.SetMetadata(id, meta); err != nil {
+			idx.mu.Unlock()
+			return err
+		}
 		idx.mu.Unlock()
 		return nil
 	}
@@ -359,7 +370,9 @@ func (idx *Index) insert(id uint32, vec []float32) error {
 		return err
 	}
 	idx.storage.setVector(id, vec)
-
+	if err := idx.storage.SetMetadata(id, meta); err != nil {
+		return err
+	}
 	idx.mu.RLock()
 	currEntryPoint := idx.entryPoint
 	currMaxLevel := idx.maxLevel
@@ -698,4 +711,109 @@ func (idx *Index) Close() error {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 	return idx.storage.Close()
+}
+
+func (idx *Index) Vacuum() error {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+
+	deletedCount := idx.storage.readUint32(48)
+	if deletedCount == 0 {
+		return nil
+	}
+
+	oldPath := idx.storage.path
+	tmpPath := oldPath + ".vacuum"
+
+	// Ensure cleanup of tmp files
+	removeFiles := func(p string) {
+		os.Remove(p)
+		os.Remove(p + ".vec")
+		os.Remove(p + ".upper")
+		os.Remove(p + ".del")
+		os.Remove(p + ".meta")
+	}
+	defer removeFiles(tmpPath)
+
+	// 1. Create temporary storage
+	// We allocate space for the CURRENT nodeCount minus deletedCount
+	newNodeCount := idx.nodeCount - deletedCount
+	tmpStorage, err := NewStorage(tmpPath, idx.storage.config, newNodeCount)
+	if err != nil {
+		return fmt.Errorf("vacuum: failed to create tmp storage: %w", err)
+	}
+	defer tmpStorage.Close()
+
+	tmpIdx := NewIndex(tmpStorage, idx.distFunc, idx.efSearch, idx.efConst)
+	tmpIdx.SetProbes(idx.probes)
+
+	// 2. Insert all non-deleted vectors in batches
+	batchSize := 1024
+	batch := make([][]float32, 0, batchSize)
+	metas := make([][]byte, 0, batchSize)
+	for i := uint32(0); i < idx.nodeCount; i++ {
+		if !idx.storage.IsDeleted(i) {
+			// We MUST copy the vector because tmpIdx.BatchInsert might use it
+			// after we've moved on to the next one, though BatchInsert currently
+			// processes them in workers before returning. Still, copying is safer.
+			vec := make([]float32, len(idx.storage.GetVector(i)))
+			copy(vec, idx.storage.GetVector(i))
+			batch = append(batch, vec)
+
+			meta := idx.storage.GetMetadata(i)
+			if meta != nil {
+				metaCopy := make([]byte, len(meta))
+				copy(metaCopy, meta)
+				metas = append(metas, metaCopy)
+			} else {
+				metas = append(metas, nil)
+			}
+
+			if len(batch) >= batchSize {
+				if err := tmpIdx.BatchInsert(batch, metas); err != nil {
+					return fmt.Errorf("vacuum: batch insert failed: %w", err)
+				}
+				batch = batch[:0]
+				metas = metas[:0]
+			}
+		}
+	}
+	if len(batch) > 0 {
+		if err := tmpIdx.BatchInsert(batch, metas); err != nil {
+			return fmt.Errorf("vacuum: final batch insert failed: %w", err)
+		}
+	}
+
+	// 3. Sync and close temporary index
+	if err := tmpIdx.Sync(); err != nil {
+		return fmt.Errorf("vacuum: sync failed: %w", err)
+	}
+	if err := tmpIdx.Close(); err != nil {
+		return fmt.Errorf("vacuum: close failed: %w", err)
+	}
+
+	// 4. Close and swap
+	if err := idx.storage.Close(); err != nil {
+		return fmt.Errorf("vacuum: failed to close old storage: %w", err)
+	}
+
+	suffixes := []string{"", ".vec", ".upper", ".del", ".meta"}
+	for _, s := range suffixes {
+		if err := os.Rename(tmpPath+s, oldPath+s); err != nil {
+			return fmt.Errorf("vacuum: failed to rename %s: %w", s, err)
+		}
+	}
+
+	// 5. Re-open
+	newStorage, err := NewStorage(oldPath, idx.storage.config, 0)
+	if err != nil {
+		return fmt.Errorf("vacuum: failed to re-open storage: %w", err)
+	}
+
+	idx.storage = newStorage
+	idx.maxLevel = int(newStorage.readUint32(36))
+	idx.entryPoint = newStorage.readUint32(24)
+	idx.nodeCount = newStorage.readUint32(28)
+
+	return nil
 }

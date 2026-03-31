@@ -3,6 +3,7 @@ package hnsw
 type Node struct {
 	ID       uint32
 	Distance float32
+	Metadata []byte
 }
 
 type nodeHeap struct {

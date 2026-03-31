@@ -31,7 +31,7 @@ func BenchmarkHNSWBuild(b *testing.B) {
 	}
 
 	for b.Loop() {
-		if err := idx.Insert(vec); err != nil {
+		if err := idx.Insert(vec, nil); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -62,7 +62,7 @@ func BenchmarkHNSWSearch(b *testing.B) {
 		for j := range vec {
 			vec[j] = rand.Float32()
 		}
-		idx.Insert(vec)
+		idx.Insert(vec, nil)
 	}
 
 	query := make([]float32, 128)
