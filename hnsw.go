@@ -22,6 +22,7 @@ type Index struct {
 	efConst    int
 	probes     int
 	pool       sync.Pool
+	freelist   []uint32
 }
 
 func NewIndex(storage *Storage, distFunc DistanceFunc, efSearch, efConst int) *Index {
@@ -289,56 +290,32 @@ func (idx *Index) BatchInsert(vecs [][]float32, metas [][]byte) error {
 	startID := idx.nodeCount
 	numVecs := uint32(len(vecs))
 
-	// Ensure storage has enough capacity
+	// Ensure storage has enough capacity for the new IDs.
 	allocated := idx.storage.readUint32(32)
-	if startID+numVecs > allocated {
-		newAllocated := max(allocated*2, startID+numVecs+1000)
+	if uint64(startID)+uint64(numVecs) > uint64(allocated) {
+		need := uint32(uint64(startID) + uint64(numVecs))
+		newAllocated := max(allocated*2, need+1000)
 		if err := idx.storage.grow(newAllocated); err != nil {
 			idx.mu.Unlock()
 			return err
 		}
+		allocated = newAllocated
 	}
 
 	idx.nodeCount += numVecs
 	idx.storage.writeUint32(28, idx.nodeCount)
 	idx.mu.Unlock()
 
-	// 2. Perform inserts in parallel
-	numWorkers := min(len(vecs), 16) // Heuristic
-	jobs := make(chan int, len(vecs))
-	errs := make(chan error, numWorkers)
-	var wg sync.WaitGroup
-
-	for w := 0; w < numWorkers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := range jobs {
-				id := startID + uint32(i)
-				var m []byte
-				if metas != nil && i < len(metas) {
-					m = metas[i]
-				}
-				if err := idx.insert(id, vecs[i], m); err != nil {
-					errs <- err
-					return
-				}
-			}
-		}()
-	}
-
+	// 2. Perform inserts sequentially so graph mutation stays race-free.
 	for i := range vecs {
-		jobs <- i
+		var m []byte
+		if metas != nil && i < len(metas) {
+			m = metas[i]
+		}
+		if err := idx.insert(startID+uint32(i), vecs[i], m); err != nil {
+			return err
+		}
 	}
-	close(jobs)
-	wg.Wait()
-
-	select {
-	case err := <-errs:
-		return err
-	default:
-	}
-
 	return nil
 }
 
@@ -607,22 +584,53 @@ func (idx *Index) shrinkNeighbors(neighbors []uint32, vec []float32, limit int) 
 	return idx.selectNeighbors(sorted, limit)
 }
 
-func (idx *Index) Delete(id uint32) error {
+func (idx *Index) Delete(id uint32) int {
+	n, _ := idx.BulkDelete([]uint32{id})
+	return n
+}
+
+// BulkDelete marks multiple IDs as deleted and heals graph connectivity.
+// Returns (countDeleted, firstError).
+func (idx *Index) BulkDelete(ids []uint32) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
-	if id >= idx.nodeCount {
-		return fmt.Errorf("hnsw: delete id %d out of bounds", id)
-	}
-	if idx.storage.IsDeleted(id) {
-		return nil
+
+	// Deduplicate and filter to valid, non-already-deleted IDs
+	seen := make(map[uint32]bool, len(ids))
+	var toDelete []uint32
+	for _, id := range ids {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		if id >= idx.nodeCount {
+			return 0, fmt.Errorf("hnsw: delete id %d out of bounds", id)
+		}
+		if !idx.storage.IsDeleted(id) {
+			toDelete = append(toDelete, id)
+		}
 	}
 
-	// Heal graph connectivity before marking as deleted.
-	// We do this by connecting neighbors of the deleted node to each other.
-	idx.repairNeighborConnection(id)
+	if len(toDelete) == 0 {
+		return 0, nil
+	}
 
-	idx.storage.SetDeleted(id, true)
-	return nil
+	// Phase 1: heal graph connectivity for all targets
+	for _, id := range toDelete {
+		idx.repairNeighborConnection(id)
+	}
+
+	// Phase 2: mark all as deleted and add to freelist
+	for _, id := range toDelete {
+		idx.storage.SetDeleted(id, true)
+		idx.freelist = append(idx.freelist, id)
+	}
+
+	return len(toDelete), nil
 }
 
 func (idx *Index) repairNeighborConnection(id uint32) {
@@ -652,11 +660,11 @@ func (idx *Index) repairNeighborConnection(id uint32) {
 		// For each u in N2, re-select neighbors from {u's neighbors} + {id's neighbors} - {id}
 		for _, u := range n2 {
 			uNb := idx.storage.GetNeighbors(u, level)
-			
+
 			// Build candidate set for u
 			candidates := make([]Node, 0, len(uNb)+len(neighbors))
 			uVec := idx.storage.GetVector(u)
-			
+
 			seen := make(map[uint32]bool)
 			seen[id] = true // Exclude the deleted node
 			seen[u] = true  // Exclude self
@@ -683,7 +691,7 @@ func (idx *Index) repairNeighborConnection(id uint32) {
 			if level == 0 {
 				limit = idx.storage.config.MMax0
 			}
-			
+
 			// selectNeighbors expects candidates sorted by distance
 			slices.SortFunc(candidates, func(a, b Node) int {
 				if a.Distance < b.Distance {

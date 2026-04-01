@@ -36,8 +36,8 @@ func TestVacuum(t *testing.T) {
 
 	// 2. Delete 50 vectors
 	for i := 0; i < 50; i++ {
-		if err := idx.Delete(uint32(i)); err != nil {
-			t.Fatalf("Delete %d failed: %v", i, err)
+		if n := idx.Delete(uint32(i)); n == 0 {
+			t.Fatalf("Delete %d returned 0", i)
 		}
 	}
 
@@ -87,7 +87,7 @@ func TestVacuum(t *testing.T) {
 
 	// Verify that deleted vectors are truly gone and IDs 0..49 don't return them
 	// Actually, the new IDs 0..49 now point to old IDs 50..99.
-	
+
 	// Check that we don't find old ID 0 (which was vectors[0])
 	results, err = idx.Search(vectors[0], 1)
 	if err != nil {

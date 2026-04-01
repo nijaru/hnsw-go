@@ -16,6 +16,222 @@ func removeTestFiles(path string) {
 	os.Remove(path + ".meta")
 }
 
+func TestBulkDelete(t *testing.T) {
+	path := "test_bulk_delete.hnsw"
+	defer removeTestFiles(path)
+
+	config := IndexConfig{
+		Dims:     128,
+		M:        16,
+		MMax0:    32,
+		MaxLevel: 16,
+	}
+
+	storage, err := NewStorage(path, config, 100)
+	if err != nil {
+		t.Fatalf("failed to create storage: %v", err)
+	}
+	defer storage.Close()
+
+	idx := NewIndex(storage, L2, 50, 50)
+
+	// Insert 100 vectors
+	vectors := make([][]float32, 100)
+	for i := range vectors {
+		vectors[i] = make([]float32, 128)
+		vectors[i][0] = float32(i)
+		idx.Insert(vectors[i], nil)
+	}
+
+	// Bulk delete IDs 10-59 (50 items)
+	n, err := idx.BulkDelete(func() []uint32 {
+		ids := make([]uint32, 50)
+		for i := 0; i < 50; i++ {
+			ids[i] = uint32(i + 10)
+		}
+		return ids
+	}())
+	if err != nil {
+		t.Fatalf("BulkDelete failed: %v", err)
+	}
+	if n != 50 {
+		t.Errorf("expected 50 deleted, got %d", n)
+	}
+
+	// Deleting already-deleted IDs is idempotent
+	n2, err := idx.BulkDelete([]uint32{10, 11, 12})
+	if err != nil {
+		t.Fatalf("BulkDelete re-delete failed: %v", err)
+	}
+	if n2 != 0 {
+		t.Errorf("expected 0 deleted (already deleted), got %d", n2)
+	}
+
+	// No deleted ID should appear in search results
+	query := make([]float32, 128)
+	query[0] = 30.0
+	results, err := idx.Search(query, 20)
+	if err != nil {
+		t.Fatalf("Search failed: %v", err)
+	}
+	for _, r := range results {
+		if r.ID >= 10 && r.ID < 60 {
+			t.Errorf("deleted ID %d appeared in results", r.ID)
+		}
+	}
+
+	// Freelist should have 50 IDs
+	idx.mu.RLock()
+	fl := len(idx.freelist)
+	idx.mu.RUnlock()
+	if fl != 50 {
+		t.Errorf("expected 50 freelist entries, got %d", fl)
+	}
+}
+
+func TestFreelistBookkeeping(t *testing.T) {
+	path := "test_freelist.hnsw"
+	defer removeTestFiles(path)
+
+	config := IndexConfig{
+		Dims:     4,
+		M:        4,
+		MMax0:    8,
+		MaxLevel: 4,
+	}
+
+	storage, err := NewStorage(path, config, 10)
+	if err != nil {
+		t.Fatalf("create storage: %v", err)
+	}
+	defer storage.Close()
+
+	idx := NewIndex(storage, L2, 10, 10)
+
+	// Insert 10 vectors with distinct values
+	vecs := make([][]float32, 10)
+	for i := range vecs {
+		vecs[i] = []float32{float32(i * 100), 0, 0, 0}
+		idx.Insert(vecs[i], nil)
+	}
+
+	// Delete IDs 2, 3, 4
+	idx.BulkDelete([]uint32{2, 3, 4})
+
+	// The freelist tracks the deletes, but inserts should still allocate fresh IDs.
+	newVecs := make([][]float32, 5)
+	for i := range newVecs {
+		newVecs[i] = []float32{float32(1000 + i), 0, 0, 0}
+	}
+	if err := idx.BatchInsert(newVecs, nil); err != nil {
+		t.Fatalf("BatchInsert: %v", err)
+	}
+
+	if idx.Len() != 15 {
+		t.Fatalf("expected len 15 after inserts, got %d", idx.Len())
+	}
+
+	// All 5 new vectors should be findable at new IDs.
+	for i, v := range newVecs {
+		results, err := idx.Search(v, 1)
+		if err != nil || len(results) == 0 {
+			t.Fatalf("search for %+v: %v", v, err)
+		}
+		wantID := uint32(10 + i)
+		if results[0].ID != wantID {
+			t.Fatalf("expected fresh ID %d for vector %v, got %d", wantID, v, results[0].ID)
+		}
+	}
+
+	// The deleted IDs remain tombstones until vacuum.
+	for _, id := range []uint32{2, 3, 4} {
+		if !idx.storage.IsDeleted(id) {
+			t.Fatalf("expected ID %d to remain deleted", id)
+		}
+	}
+
+	// The freelist is bookkeeping, not a live allocator.
+	idx.mu.RLock()
+	fl := len(idx.freelist)
+	idx.mu.RUnlock()
+	if fl != 3 {
+		t.Fatalf("expected freelist length 3, got %d", fl)
+	}
+}
+
+func TestConcurrentBulkDeleteSearch(t *testing.T) {
+	path := "test_concurrent_deletes.hnsw"
+	defer removeTestFiles(path)
+
+	config := IndexConfig{
+		Dims:     128,
+		M:        16,
+		MMax0:    32,
+		MaxLevel: 16,
+	}
+
+	storage, err := NewStorage(path, config, 5000)
+	if err != nil {
+		t.Fatalf("create storage: %v", err)
+	}
+	defer storage.Close()
+
+	idx := NewIndex(storage, L2, 50, 50)
+
+	// Seed 1000 nodes
+	for i := 0; i < 1000; i++ {
+		vec := make([]float32, 128)
+		for j := range vec {
+			vec[j] = rand.Float32()
+		}
+		idx.Insert(vec, nil)
+	}
+
+	var wg sync.WaitGroup
+	var searchErrs atomic.Int32
+
+	// 4 goroutines doing bulk deletes
+	for g := 0; g < 4; g++ {
+		wg.Add(1)
+		go func(seed int) {
+			defer wg.Done()
+			rng := rand.New(rand.NewPCG(uint64(seed), 0))
+			for b := 0; b < 10; b++ {
+				ids := make([]uint32, 20)
+				for i := range ids {
+					ids[i] = rng.Uint32N(uint32(idx.Len()))
+				}
+				idx.BulkDelete(ids)
+			}
+		}(g)
+	}
+
+	// 8 goroutines searching
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			query := make([]float32, 128)
+			for i := 0; i < 200; i++ {
+				for j := range query {
+					query[j] = rand.Float32()
+				}
+				_, err := idx.Search(query, 10)
+				if err != nil {
+					searchErrs.Add(1)
+					return
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	if se := searchErrs.Load(); se > 0 {
+		t.Errorf("%d search errors during concurrent ops", se)
+	}
+}
+
 func TestDelete(t *testing.T) {
 	path := "test_delete.hnsw"
 	defer removeTestFiles(path)
@@ -44,8 +260,8 @@ func TestDelete(t *testing.T) {
 	}
 
 	// Delete ID 5
-	if err := idx.Delete(5); err != nil {
-		t.Fatalf("Delete failed: %v", err)
+	if n := idx.Delete(5); n == 0 {
+		t.Fatalf("Delete returned 0")
 	}
 
 	// Search for vector that was at ID 5
@@ -63,8 +279,8 @@ func TestDelete(t *testing.T) {
 	}
 
 	// Delete ID 0 (entry point)
-	if err := idx.Delete(0); err != nil {
-		t.Fatalf("Delete ID 0 failed: %v", err)
+	if n := idx.Delete(0); n == 0 {
+		t.Fatalf("Delete ID 0 returned 0")
 	}
 
 	results, err = idx.Search(query, 5)

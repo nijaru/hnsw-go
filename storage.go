@@ -91,7 +91,6 @@ type Storage struct {
 	allocMu     sync.Mutex
 }
 
-
 func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage, error) {
 	if config.Dims == 0 {
 		return nil, fmt.Errorf("hnsw: Dims must be > 0")
@@ -523,7 +522,7 @@ func (s *Storage) SetDeleted(id uint32, deleted bool) {
 		if !deleted {
 			return
 		}
-		newSize := max(uint32(len(s.delData)*2), (id/8 + 4096) &^ 4095)
+		newSize := max(uint32(len(s.delData)*2), (id/8+4096)&^4095)
 		if err := s.growDeleted(newSize); err != nil {
 			panic(err)
 		}
@@ -670,7 +669,7 @@ func (s *Storage) SetMetadata(id uint32, meta []byte) error {
 	}
 
 	size := uint32(len(meta))
-	
+
 	s.allocMu.Lock()
 	used := s.readUint32(56)
 	allocated := s.readUint32(52)
@@ -734,7 +733,7 @@ func (s *Storage) GetNeighbors(id uint32, layer int) []uint32 {
 		}
 		level := int(binary.LittleEndian.Uint32(data[s.layout.LevelOffset : s.layout.LevelOffset+4]))
 		if layer > level {
-			panic("hnsw: layer > node level")
+			return nil
 		}
 
 		// upperData layout: [L]counts, [L*M]neighbors
@@ -786,7 +785,7 @@ func (s *Storage) allocateUpper(id uint32, level int) error {
 	}
 
 	size := uint32(level) * (1 + s.config.M) * 4
-	
+
 	s.allocMu.Lock()
 	used := s.readUint32(44)
 	allocated := s.readUint32(40)

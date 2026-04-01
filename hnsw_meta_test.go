@@ -88,7 +88,7 @@ func TestMetadata(t *testing.T) {
 
 	// 4. Persistence check
 	storage.Close()
-	
+
 	storage2, err := NewStorage(path, config, 0)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
@@ -128,8 +128,8 @@ func TestVacuumWithMetadata(t *testing.T) {
 	idx.Insert([]float32{0, 1, 0, 0}, []byte("meta 1"))
 	idx.Insert([]float32{0, 0, 1, 0}, []byte("meta 2"))
 
-	if err := idx.Delete(1); err != nil {
-		t.Fatalf("Delete failed: %v", err)
+	if n := idx.Delete(1); n == 0 {
+		t.Fatalf("Delete returned 0")
 	}
 
 	if err := idx.Vacuum(); err != nil {
