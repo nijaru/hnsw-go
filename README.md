@@ -38,9 +38,12 @@ func main() {
 
     // Insert with optional metadata
     meta := []byte("{\"text\": \"hello world\"}")
-    idx.Insert(vec, meta)
+    idx.Insert([]float32{0.1, 0.2, /*...*/}, meta)
 
-    results, _ := idx.Search(query, 10)
+    // Zero-allocation search path
+    results := make([]hnsw.Node, 0, 10)
+    results, _ = idx.SearchInto(results, query, 10)
+    
     for _, r := range results {
         fmt.Printf("ID=%d Distance=%f Meta=%s\n", r.ID, r.Distance, string(r.Metadata))
     }
@@ -60,18 +63,42 @@ type IndexConfig struct {
 }
 ```
 
-### Index
+### Index Operations
 
 | Method | Description |
 |--------|-------------|
 | `NewIndex(storage, distFunc, efSearch, efConst)` | Create index from storage. efSearch defaults to 16, efConst to 200. |
 | `Insert(vec, meta)` error | Insert a vector with optional metadata |
-| `BatchInsert(vecs, metas)` error | Insert multiple vectors/metas in parallel |
-| `Search(query, k)` ([]Node, error) | Search for k nearest neighbors (returns ID, Distance, and Metadata) |
-| `SetEfSearch(ef)` | Adjust search effort at runtime |
-| `SetEfConst(ef)` | Adjust construction effort at runtime |
-| `Len()` int | Number of indexed vectors |
-| `Stats()` Stats | Index statistics |
+| `BatchInsert(vecs, metas)` error | Insert multiple vectors/metas sequentially to avoid per-node lock contention |
+| `Replace(id, vec, meta)` error | Refresh a vector in place |
+| `Delete(id)` error | Mark a node as logically deleted |
+| `Rebuild()` error / `Vacuum()` | Perform a compacting rewrite of the index to reclaim space |
+
+### Search
+
+| Method | Description |
+|--------|-------------|
+| `Search(query, k)` ([]Node, error) | Search for k nearest neighbors (allocates result slice) |
+| `SearchInto(dst, query, k)` ([]Node, error) | Zero-alloc search appending to a caller-provided slice |
+| `SearchAllowed(query, k, allow)` ([]Node, error) | Search restricted to IDs in an `AllowList` |
+| `SearchPlanned(query, k, allow)` ([]Node, error) | Auto-selects exact vs HNSW search based on allow-list size |
+
+### Filtering
+
+`hnsw-go` includes embedded filter indexes for fast, zero-alloc generation of allow-lists:
+
+- **`TermIndex`**: Inverted index mapping string terms (tenants, tags) to node IDs. Supports `Allow`, `AllowIntersect`, and `AllowUnion`.
+- **`RangeIndex`**: Index mapping field names to sorted `float64` values. Supports `AllowRange`.
+
+### Segmented Index (Coordinator)
+
+For larger embedded workloads, `SegmentedIndex` provides an immutable view over a mutable head segment and zero or more frozen segments. It maps stable global IDs to segment-local IDs, merging search results correctly without mutating frozen data.
+
+| Method | Description |
+|--------|-------------|
+| `NewSegmentedIndexFrom(head, frozen...)` | Create a coordinator mapping global IDs |
+| `Publish(head, frozen...)` error | Atomically publish a new layout of segments |
+| `SearchInto(dst, query, k)` ([]Node, error) | Zero-alloc merged top-k search across segments |
 
 ### Distance Functions
 
@@ -95,6 +122,16 @@ Apple M3 Max, SIFT 10k (128-dim, 10,000 vectors), M=16, efSearch=200:
 ## Development
 
 Run `make hooks` once per clone to enable the repo-local pre-commit hook. It auto-formats staged Go files and re-stages them before commit.
+
+## Profiling
+
+Use `make profile WORKLOAD=search` for the synthetic search workload, or set `PROFILE_ARGS='-sift sift10k_test.bin'` to run the SIFT dataset through the same harness. Other saved workloads are `filtered`, `build`, `delete`, `vacuum`, and `planner`.
+
+Profiles are written as `.profiles/<workload>.cpu.prof` and `.profiles/<workload>.heap.prof`. Open them with `go tool pprof`, for example:
+
+```sh
+go tool pprof -http=:0 .profiles/search.cpu.prof
+```
 
 ## Requirements
 
