@@ -161,3 +161,106 @@ func (ti *TermIndex) AllowUnion(terms ...string) AllowList {
 
 	return NewAllowIDsSorted(union)
 }
+
+// numericEntry represents a single stored value and its associated node ID.
+type numericEntry struct {
+	val float64
+	id  uint32
+}
+
+// RangeIndex is an embedded filter index mapping field names to sorted float64 values.
+// It allows fast generation of allow-lists for numeric or time range filters.
+type RangeIndex struct {
+	mu     sync.RWMutex
+	fields map[string][]numericEntry
+}
+
+func NewRangeIndex() *RangeIndex {
+	return &RangeIndex{
+		fields: make(map[string][]numericEntry),
+	}
+}
+
+// Add associates a node ID with a numeric value in a specific field.
+// It maintains the slice in ascending order by value, then by ID.
+func (ri *RangeIndex) Add(id uint32, field string, val float64) {
+	ri.mu.Lock()
+	defer ri.mu.Unlock()
+
+	entries := ri.fields[field]
+	entry := numericEntry{val: val, id: id}
+
+	idx, _ := slices.BinarySearchFunc(entries, entry, func(a, b numericEntry) int {
+		if a.val < b.val {
+			return -1
+		}
+		if a.val > b.val {
+			return 1
+		}
+		if a.id < b.id {
+			return -1
+		}
+		if a.id > b.id {
+			return 1
+		}
+		return 0
+	})
+
+	entries = slices.Insert(entries, idx, entry)
+	ri.fields[field] = entries
+}
+
+// Remove drops a node ID from a specific field.
+func (ri *RangeIndex) Remove(id uint32, field string) {
+	ri.mu.Lock()
+	defer ri.mu.Unlock()
+
+	entries := ri.fields[field]
+	for i, e := range entries {
+		if e.id == id {
+			ri.fields[field] = slices.Delete(entries, i, i+1)
+			break // Assuming 1 value per field per ID
+		}
+	}
+}
+
+// AllowRange returns an AllowList of IDs whose values fall in [minVal, maxVal].
+func (ri *RangeIndex) AllowRange(field string, minVal, maxVal float64) AllowList {
+	ri.mu.RLock()
+	defer ri.mu.RUnlock()
+
+	entries := ri.fields[field]
+	if len(entries) == 0 {
+		return AllowList{}
+	}
+
+	startIdx, _ := slices.BinarySearchFunc(
+		entries,
+		numericEntry{val: minVal},
+		func(a, b numericEntry) int {
+			if a.val < b.val {
+				return -1
+			}
+			if a.val > b.val {
+				return 1
+			}
+			return 0 // Match strictly on value for range start
+		},
+	)
+
+	var ids []uint32
+	for i := startIdx; i < len(entries); i++ {
+		if entries[i].val > maxVal {
+			break
+		}
+		ids = append(ids, entries[i].id)
+	}
+
+	if len(ids) == 0 {
+		return AllowList{}
+	}
+
+	// IDs are sorted by (val, id) natively, but for the AllowList they must be strictly sorted by ID.
+	slices.Sort(ids)
+	return NewAllowIDsSorted(ids)
+}
