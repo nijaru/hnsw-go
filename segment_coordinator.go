@@ -151,6 +151,11 @@ func (idx *SegmentedIndex) SearchInto(dst []Node, query []float32, k int) ([]Nod
 				continue
 			}
 
+			canonSeg, canonLocal, ok := view.resolve(global)
+			if !ok || canonSeg != uint32(i) || canonLocal != n.ID {
+				continue
+			}
+
 			if buf.seen[global] != buf.gen || n.Distance < buf.best[global].Distance {
 				n.ID = global
 				buf.best[global] = n
