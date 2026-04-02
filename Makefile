@@ -1,4 +1,4 @@
-.PHONY: fmt vet test bench tidy check
+.PHONY: fmt fmt-check hooks vet test bench tidy check
 
 fmt:
 	@files="$$(git ls-files '*.go')"; \
@@ -8,6 +8,24 @@ fmt:
 		goimports -w $$files; \
 		golines --base-formatter gofumpt -w $$files; \
 	fi
+
+fmt-check:
+	@files="$$(git ls-files '*.go')"; \
+	if [ -z "$$files" ]; then \
+		echo "no tracked Go files to check"; \
+	else \
+		unformatted="$$( { goimports -l $$files; golines --base-formatter gofumpt -l $$files; } | sort -u )"; \
+		if [ -n "$$unformatted" ]; then \
+			echo "The following files are not formatted correctly:"; \
+			printf '%s\n' "$$unformatted"; \
+			echo "Please run 'make fmt' locally."; \
+			exit 1; \
+		fi; \
+	fi
+
+hooks:
+	@git config core.hooksPath .githooks
+	@echo "Configured git hooks path to .githooks"
 
 vet:
 	@go vet ./...
@@ -24,4 +42,4 @@ build:
 tidy:
 	@go mod tidy
 
-check: fmt vet test bench build
+check: fmt-check vet test bench build
