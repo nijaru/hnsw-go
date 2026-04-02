@@ -92,6 +92,10 @@ Apple M3 Max, SIFT 10k (128-dim, 10,000 vectors), M=16, efSearch=200:
 | p50 latency | 133μs |
 | p99 latency | 241μs |
 
+## Development
+
+Run `make hooks` once per clone to enable the repo-local pre-commit hook. It auto-formats staged Go files and re-stages them before commit.
+
 ## Requirements
 
 - Go 1.24+

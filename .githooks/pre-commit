@@ -2,4 +2,18 @@
 set -eu
 
 cd "$(git rev-parse --show-toplevel)"
-make fmt-check
+
+files="$(git diff --cached --name-only --diff-filter=ACMR -- '*.go')"
+if [ -z "$files" ]; then
+	exit 0
+fi
+
+printf '%s\n' "$files" | while IFS= read -r file; do
+	[ -n "$file" ] || continue
+	goimports -w "$file"
+	golines --base-formatter gofumpt -w "$file"
+	git add -- "$file"
+done
+
+echo "Formatted and re-staged:"
+printf '%s\n' "$files"
