@@ -3,74 +3,178 @@ package hnsw
 import (
 	"fmt"
 	"math/rand/v2"
+	"path/filepath"
 	"testing"
 )
 
-func BenchmarkHNSWBuild(b *testing.B) {
-	path := "bench_build.hnsw"
-	defer removeTestFiles(path)
+const (
+	benchDims      = 128
+	benchNodes     = 10_000
+	benchM         = 16
+	benchMMax0     = 32
+	benchMaxLevel  = 16
+	benchEfSearch  = 200
+	benchEfConst   = 200
+	benchSearchK   = 10
+	benchDeleteCnt = benchNodes / 4
+)
 
-	config := IndexConfig{
-		Dims:     128,
-		M:        16,
-		MMax0:    32,
-		MaxLevel: 16,
-	}
+func BenchmarkHNSWSearch(b *testing.B) {
+	vectors := benchVectors(benchNodes, benchDims, 0x01, 0x02)
+	path := filepath.Join(b.TempDir(), "search.hnsw")
 
-	storage, err := NewStorage(path, config, uint32(b.N))
-	if err != nil {
+	b.StopTimer()
+	idx := benchOpenIndex(b, path, len(vectors))
+	defer func() {
+		if err := idx.Close(); err != nil {
+			b.Fatal(err)
+		}
+	}()
+
+	if err := idx.BatchInsert(vectors, nil); err != nil {
 		b.Fatal(err)
 	}
-	defer storage.Close()
 
-	idx := NewIndex(storage, L2, 100, 100)
-
-	vec := make([]float32, 128)
-	for i := range vec {
-		vec[i] = rand.Float32()
+	query := vectors[len(vectors)/2]
+	if _, err := idx.Search(query, benchSearchK); err != nil {
+		b.Fatal(err)
 	}
 
+	b.StartTimer()
 	for b.Loop() {
-		if err := idx.Insert(vec, nil); err != nil {
+		if _, err := idx.Search(query, benchSearchK); err != nil {
 			b.Fatal(err)
 		}
 	}
+	b.StopTimer()
 }
 
-func BenchmarkHNSWSearch(b *testing.B) {
-	path := fmt.Sprintf("bench_search_%d.hnsw", rand.Int64())
-	defer removeTestFiles(path)
+func BenchmarkHNSWBatchInsert(b *testing.B) {
+	vectors := benchVectors(benchNodes, benchDims, 0x11, 0x22)
+	root := b.TempDir()
 
-	config := IndexConfig{
-		Dims:     128,
-		M:        16,
-		MMax0:    32,
-		MaxLevel: 16,
+	b.StopTimer()
+	for i := 0; i < b.N; i++ {
+		path := filepath.Join(root, fmt.Sprintf("batch_insert_%d.hnsw", i))
+		func() {
+			idx := benchOpenIndex(b, path, len(vectors))
+			defer removeTestFiles(path)
+			defer func() {
+				if err := idx.Close(); err != nil {
+					b.Fatal(err)
+				}
+			}()
+
+			b.StartTimer()
+			if err := idx.BatchInsert(vectors, nil); err != nil {
+				b.Fatal(err)
+			}
+			b.StopTimer()
+		}()
 	}
+}
 
-	numNodes := 10000
-	storage, err := NewStorage(path, config, uint32(numNodes))
+func BenchmarkHNSWDelete(b *testing.B) {
+	vectors := benchVectors(benchNodes, benchDims, 0x33, 0x44)
+	root := b.TempDir()
+	deleteID := uint32(len(vectors) / 2)
+
+	b.StopTimer()
+	for i := 0; i < b.N; i++ {
+		path := filepath.Join(root, fmt.Sprintf("delete_%d.hnsw", i))
+		func() {
+			idx := benchOpenIndex(b, path, len(vectors))
+			defer removeTestFiles(path)
+			defer func() {
+				if err := idx.Close(); err != nil {
+					b.Fatal(err)
+				}
+			}()
+
+			if err := idx.BatchInsert(vectors, nil); err != nil {
+				b.Fatal(err)
+			}
+
+			b.StartTimer()
+			if n := idx.Delete(deleteID); n != 1 {
+				b.Fatalf("expected 1 deleted node, got %d", n)
+			}
+			b.StopTimer()
+		}()
+	}
+}
+
+func BenchmarkHNSWVacuum(b *testing.B) {
+	vectors := benchVectors(benchNodes, benchDims, 0x55, 0x66)
+	root := b.TempDir()
+	deleteIDs := benchDeleteIDs(len(vectors), benchDeleteCnt)
+
+	b.StopTimer()
+	for i := 0; i < b.N; i++ {
+		path := filepath.Join(root, fmt.Sprintf("vacuum_%d.hnsw", i))
+		func() {
+			idx := benchOpenIndex(b, path, len(vectors))
+			defer removeTestFiles(path)
+			defer func() {
+				if err := idx.Close(); err != nil {
+					b.Fatal(err)
+				}
+			}()
+
+			if err := idx.BatchInsert(vectors, nil); err != nil {
+				b.Fatal(err)
+			}
+			if deleted, err := idx.BulkDelete(deleteIDs); err != nil {
+				b.Fatal(err)
+			} else if deleted != len(deleteIDs) {
+				b.Fatalf("expected %d deleted nodes, got %d", len(deleteIDs), deleted)
+			}
+
+			b.StartTimer()
+			if err := idx.Vacuum(); err != nil {
+				b.Fatal(err)
+			}
+			b.StopTimer()
+		}()
+	}
+}
+
+func benchOpenIndex(tb testing.TB, path string, capacity int) *Index {
+	tb.Helper()
+
+	storage, err := NewStorage(path, IndexConfig{
+		Dims:     benchDims,
+		M:        benchM,
+		MMax0:    benchMMax0,
+		MaxLevel: benchMaxLevel,
+	}, uint32(capacity))
 	if err != nil {
-		b.Fatal(err)
+		tb.Fatal(err)
 	}
-	defer storage.Close()
 
-	idx := NewIndex(storage, L2, 100, 100)
+	return NewIndex(storage, L2, benchEfSearch, benchEfConst)
+}
 
-	vec := make([]float32, 128)
-	for i := 0; i < numNodes; i++ {
-		for j := range vec {
-			vec[j] = rand.Float32()
+func benchVectors(n, dims int, seed1, seed2 uint64) [][]float32 {
+	r := rand.New(rand.NewPCG(seed1, seed2))
+	vecs := make([][]float32, n)
+	for i := range vecs {
+		vecs[i] = make([]float32, dims)
+		for j := range vecs[i] {
+			vecs[i][j] = r.Float32()
 		}
-		idx.Insert(vec, nil)
+	}
+	return vecs
+}
+
+func benchDeleteIDs(total, count int) []uint32 {
+	if count > total {
+		count = total
 	}
 
-	query := make([]float32, 128)
-	for i := range query {
-		query[i] = rand.Float32()
+	ids := make([]uint32, count)
+	for i := range ids {
+		ids[i] = uint32(i)
 	}
-
-	for b.Loop() {
-		idx.Search(query, 10)
-	}
+	return ids
 }
