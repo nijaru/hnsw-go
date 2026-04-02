@@ -22,6 +22,7 @@ const (
 func BenchmarkHNSWSearch(b *testing.B) {
 	vectors := benchVectors(benchNodes, benchDims, 0x01, 0x02)
 	path := filepath.Join(b.TempDir(), "search.hnsw")
+	results := make([]Node, 0, benchSearchK)
 
 	b.StopTimer()
 	idx := benchOpenIndex(b, path, len(vectors))
@@ -42,7 +43,9 @@ func BenchmarkHNSWSearch(b *testing.B) {
 
 	b.StartTimer()
 	for b.Loop() {
-		if _, err := idx.Search(query, benchSearchK); err != nil {
+		var err error
+		results, err = idx.SearchInto(results[:0], query, benchSearchK)
+		if err != nil {
 			b.Fatal(err)
 		}
 	}

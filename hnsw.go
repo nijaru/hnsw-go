@@ -122,6 +122,10 @@ func (idx *Index) Stats() Stats {
 }
 
 func (idx *Index) Search(query []float32, k int) ([]Node, error) {
+	return idx.SearchInto(nil, query, k)
+}
+
+func (idx *Index) SearchInto(dst []Node, query []float32, k int) ([]Node, error) {
 	if len(query) != int(idx.storage.config.Dims) {
 		return nil, fmt.Errorf(
 			"hnsw: query dims %d != index dims %d",
@@ -257,9 +261,7 @@ func (idx *Index) Search(query []float32, k int) ([]Node, error) {
 	slices.Reverse(buf.out)
 
 	actualK := min(k, len(buf.out))
-	res := make([]Node, actualK)
-	copy(res, buf.out[:actualK])
-	return res, nil
+	return append(dst[:0], buf.out[:actualK]...), nil
 }
 
 func (idx *Index) Insert(vec []float32, meta []byte) error {
