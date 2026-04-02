@@ -125,7 +125,48 @@ func (idx *Index) Search(query []float32, k int) ([]Node, error) {
 	return idx.SearchInto(nil, query, k)
 }
 
+// SearchInto appends up to k search results into dst and returns the slice.
+// Passing a preallocated dst keeps the hot path allocation-free.
 func (idx *Index) SearchInto(dst []Node, query []float32, k int) ([]Node, error) {
+	return idx.searchInto(dst, query, k, nil)
+}
+
+// SearchFiltered returns up to k results that satisfy allow.
+func (idx *Index) SearchFiltered(query []float32, k int, allow func(Node) bool) ([]Node, error) {
+	return idx.SearchFilteredInto(nil, query, k, allow)
+}
+
+// SearchFilteredInto appends up to k filtered results into dst.
+func (idx *Index) SearchFilteredInto(
+	dst []Node,
+	query []float32,
+	k int,
+	allow func(Node) bool,
+) ([]Node, error) {
+	return idx.searchInto(dst, query, k, allow)
+}
+
+// CopyMetadata returns a detached copy of a node's metadata bytes.
+func (idx *Index) CopyMetadata(id uint32) []byte {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+
+	meta := idx.storage.GetMetadata(id)
+	if len(meta) == 0 {
+		return nil
+	}
+
+	out := make([]byte, len(meta))
+	copy(out, meta)
+	return out
+}
+
+func (idx *Index) searchInto(
+	dst []Node,
+	query []float32,
+	k int,
+	allow func(Node) bool,
+) ([]Node, error) {
 	if len(query) != int(idx.storage.config.Dims) {
 		return nil, fmt.Errorf(
 			"hnsw: query dims %d != index dims %d",
@@ -255,6 +296,9 @@ func (idx *Index) SearchInto(dst []Node, query []float32, k int) ([]Node, error)
 		if !idx.storage.IsDeleted(n.ID) {
 			// Fetch metadata only for the results
 			n.Metadata = idx.storage.GetMetadata(n.ID)
+			if allow != nil && !allow(n) {
+				continue
+			}
 			buf.out = append(buf.out, n)
 		}
 	}
