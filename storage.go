@@ -655,7 +655,9 @@ func (s *Storage) GetVector(id uint32) []float32 {
 
 func (s *Storage) GetMetadata(id uint32) []byte {
 	data := s.getGraphNode(id)
-	offset := binary.LittleEndian.Uint32(data[s.layout.MetaOffsetOffset : s.layout.MetaOffsetOffset+4])
+	offset := binary.LittleEndian.Uint32(
+		data[s.layout.MetaOffsetOffset : s.layout.MetaOffsetOffset+4],
+	)
 	if offset == 0 {
 		return nil
 	}
@@ -688,7 +690,10 @@ func (s *Storage) SetMetadata(id uint32, meta []byte) error {
 	s.allocMu.Unlock()
 
 	data := s.getGraphNode(id)
-	binary.LittleEndian.PutUint32(data[s.layout.MetaOffsetOffset:s.layout.MetaOffsetOffset+4], offset)
+	binary.LittleEndian.PutUint32(
+		data[s.layout.MetaOffsetOffset:s.layout.MetaOffsetOffset+4],
+		offset,
+	)
 	binary.LittleEndian.PutUint32(data[s.layout.MetaLenOffset:s.layout.MetaLenOffset+4], size)
 	return nil
 }
@@ -803,7 +808,10 @@ func (s *Storage) allocateUpper(id uint32, level int) error {
 	s.allocMu.Unlock()
 
 	data := s.getGraphNode(id)
-	binary.LittleEndian.PutUint32(data[s.layout.UpperOffsetOffset:s.layout.UpperOffsetOffset+4], offset)
+	binary.LittleEndian.PutUint32(
+		data[s.layout.UpperOffsetOffset:s.layout.UpperOffsetOffset+4],
+		offset,
+	)
 	return nil
 }
 

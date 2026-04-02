@@ -864,7 +864,11 @@ func TestMultiProbe(t *testing.T) {
 
 	if len(res1) > 0 && len(res4) > 0 {
 		if res4[0].Distance > res1[0].Distance {
-			t.Errorf("multi-probe (4) found worse result than single-probe: %f > %f", res4[0].Distance, res1[0].Distance)
+			t.Errorf(
+				"multi-probe (4) found worse result than single-probe: %f > %f",
+				res4[0].Distance,
+				res1[0].Distance,
+			)
 		}
 		t.Logf("Distances: probe=1: %f, probe=4: %f", res1[0].Distance, res4[0].Distance)
 	}

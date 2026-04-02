@@ -101,7 +101,11 @@ func TestMetadata(t *testing.T) {
 		t.Fatalf("search after reopen: %v", err)
 	}
 	if string(results[0].Metadata) != string(meta2) {
-		t.Errorf("persistence: expected meta2 %q, got %q", string(meta2), string(results[0].Metadata))
+		t.Errorf(
+			"persistence: expected meta2 %q, got %q",
+			string(meta2),
+			string(results[0].Metadata),
+		)
 	}
 }
 
