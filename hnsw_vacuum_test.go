@@ -99,3 +99,70 @@ func TestVacuum(t *testing.T) {
 
 	t.Logf("Vacuum successful: 100 -> 50 nodes. Old size: %d, New size: %d", oldSize, newSize)
 }
+
+func TestVacuumClearsFreelist(t *testing.T) {
+	path := "test_vacuum_freelist.hnsw"
+	defer removeTestFiles(path)
+
+	config := IndexConfig{
+		Dims:     32,
+		M:        8,
+		MMax0:    16,
+		MaxLevel: 8,
+	}
+
+	storage, err := NewStorage(path, config, 32)
+	if err != nil {
+		t.Fatalf("failed to create storage: %v", err)
+	}
+
+	idx := NewIndex(storage, L2, 32, 32)
+	defer idx.Close()
+
+	vecs := make([][]float32, 16)
+	for i := range vecs {
+		vecs[i] = make([]float32, 32)
+		vecs[i][0] = float32(i)
+		if err := idx.Insert(vecs[i], nil); err != nil {
+			t.Fatalf("Insert %d failed: %v", i, err)
+		}
+	}
+
+	if n, err := idx.BulkDelete([]uint32{2, 4, 6, 8, 10}); err != nil {
+		t.Fatalf("BulkDelete failed: %v", err)
+	} else if n != 5 {
+		t.Fatalf("expected 5 deleted, got %d", n)
+	}
+
+	idx.mu.RLock()
+	if got := len(idx.freelist); got != 5 {
+		idx.mu.RUnlock()
+		t.Fatalf("expected freelist length 5 before vacuum, got %d", got)
+	}
+	idx.mu.RUnlock()
+
+	if err := idx.Vacuum(); err != nil {
+		t.Fatalf("Vacuum failed: %v", err)
+	}
+
+	idx.mu.RLock()
+	got := len(idx.freelist)
+	idx.mu.RUnlock()
+	if got != 0 {
+		t.Fatalf("expected freelist to be cleared after vacuum, got %d", got)
+	}
+
+	if idx.Len() != 11 {
+		t.Fatalf("expected len 11 after vacuum, got %d", idx.Len())
+	}
+
+	for _, vec := range [][]float32{vecs[0], vecs[1], vecs[3], vecs[5], vecs[7]} {
+		results, err := idx.Search(vec, 1)
+		if err != nil {
+			t.Fatalf("Search after vacuum failed: %v", err)
+		}
+		if len(results) == 0 || results[0].Distance > 0.0001 {
+			t.Fatalf("expected surviving vector to remain searchable after vacuum")
+		}
+	}
+}

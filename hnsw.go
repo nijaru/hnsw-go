@@ -822,6 +822,7 @@ func (idx *Index) Vacuum() error {
 	idx.maxLevel = int(newStorage.readUint32(36))
 	idx.entryPoint = newStorage.readUint32(24)
 	idx.nodeCount = newStorage.readUint32(28)
+	idx.freelist = nil
 
 	return nil
 }
