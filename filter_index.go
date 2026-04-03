@@ -1,6 +1,7 @@
 package hnsw
 
 import (
+	"cmp"
 	"slices"
 	"sync"
 )
@@ -25,10 +26,13 @@ func (ti *TermIndex) Add(id uint32, terms ...string) {
 
 	for _, term := range terms {
 		ids := ti.terms[term]
-		if len(ids) == 0 || ids[len(ids)-1] != id {
-			// Note: expects IDs to be added in ascending order to maintain sorting.
-			// The caller (like BatchInsert) naturally provides ascending IDs.
+		if len(ids) == 0 || ids[len(ids)-1] < id {
 			ti.terms[term] = append(ids, id)
+		} else if ids[len(ids)-1] != id {
+			idx, found := slices.BinarySearch(ids, id)
+			if !found {
+				ti.terms[term] = slices.Insert(ids, idx, id)
+			}
 		}
 	}
 }
@@ -191,19 +195,10 @@ func (ri *RangeIndex) Add(id uint32, field string, val float64) {
 	entry := numericEntry{val: val, id: id}
 
 	idx, _ := slices.BinarySearchFunc(entries, entry, func(a, b numericEntry) int {
-		if a.val < b.val {
-			return -1
+		if c := cmp.Compare(a.val, b.val); c != 0 {
+			return c
 		}
-		if a.val > b.val {
-			return 1
-		}
-		if a.id < b.id {
-			return -1
-		}
-		if a.id > b.id {
-			return 1
-		}
-		return 0
+		return cmp.Compare(a.id, b.id)
 	})
 
 	entries = slices.Insert(entries, idx, entry)
@@ -238,13 +233,7 @@ func (ri *RangeIndex) AllowRange(field string, minVal, maxVal float64) AllowList
 		entries,
 		numericEntry{val: minVal},
 		func(a, b numericEntry) int {
-			if a.val < b.val {
-				return -1
-			}
-			if a.val > b.val {
-				return 1
-			}
-			return 0 // Match strictly on value for range start
+			return cmp.Compare(a.val, b.val)
 		},
 	)
 

@@ -8,12 +8,13 @@ import (
 )
 
 type segmentMergeBuffer struct {
-	seen    []uint8
-	best    []Node
-	results maxNodeHeap
-	out     []Node
-	local   []Node
-	gen     uint8
+	seen     []uint8
+	best     []Node
+	results  maxNodeHeap
+	out      []Node
+	local    []Node
+	localIDs []uint32
+	gen      uint8
 }
 
 func newSegmentMergeBuffer(globalCap, localCap, outCap int) *segmentMergeBuffer {
@@ -28,12 +29,13 @@ func newSegmentMergeBuffer(globalCap, localCap, outCap int) *segmentMergeBuffer 
 	}
 
 	return &segmentMergeBuffer{
-		seen:    make([]uint8, globalCap),
-		best:    make([]Node, globalCap),
-		results: maxNodeHeap{Nodes: make([]Node, 0, outCap)},
-		out:     make([]Node, 0, outCap),
-		local:   make([]Node, 0, localCap),
-		gen:     1,
+		seen:     make([]uint8, globalCap),
+		best:     make([]Node, globalCap),
+		results:  maxNodeHeap{Nodes: make([]Node, 0, outCap)},
+		out:      make([]Node, 0, outCap),
+		local:    make([]Node, 0, localCap),
+		localIDs: make([]uint32, 0, localCap),
+		gen:      1,
 	}
 }
 
@@ -57,6 +59,11 @@ func (b *segmentMergeBuffer) reset(globalCap, localCap, outCap int) {
 		b.local = make([]Node, 0, localCap)
 	} else {
 		b.local = b.local[:0]
+	}
+	if cap(b.localIDs) < localCap {
+		b.localIDs = make([]uint32, 0, localCap)
+	} else {
+		b.localIDs = b.localIDs[:0]
 	}
 	if cap(b.results.Nodes) < outCap {
 		b.results.Nodes = make([]Node, 0, outCap)
@@ -116,10 +123,46 @@ func (idx *SegmentedIndex) Publish(head *Index, frozen ...*Index) error {
 }
 
 func (idx *SegmentedIndex) Search(query []float32, k int) ([]Node, error) {
-	return idx.SearchInto(nil, query, k)
+	return idx.searchInto(nil, query, k, nil, false)
 }
 
 func (idx *SegmentedIndex) SearchInto(dst []Node, query []float32, k int) ([]Node, error) {
+	return idx.searchInto(dst, query, k, nil, false)
+}
+
+func (idx *SegmentedIndex) SearchAllowed(query []float32, k int, allow AllowList) ([]Node, error) {
+	return idx.searchInto(nil, query, k, &allow, false)
+}
+
+func (idx *SegmentedIndex) SearchAllowedInto(
+	dst []Node,
+	query []float32,
+	k int,
+	allow AllowList,
+) ([]Node, error) {
+	return idx.searchInto(dst, query, k, &allow, false)
+}
+
+func (idx *SegmentedIndex) SearchPlanned(query []float32, k int, allow AllowList) ([]Node, error) {
+	return idx.searchInto(nil, query, k, &allow, true)
+}
+
+func (idx *SegmentedIndex) SearchPlannedInto(
+	dst []Node,
+	query []float32,
+	k int,
+	allow AllowList,
+) ([]Node, error) {
+	return idx.searchInto(dst, query, k, &allow, true)
+}
+
+func (idx *SegmentedIndex) searchInto(
+	dst []Node,
+	query []float32,
+	k int,
+	allow *AllowList,
+	planned bool,
+) ([]Node, error) {
 	if k <= 0 {
 		return nil, nil
 	}
@@ -139,7 +182,41 @@ func (idx *SegmentedIndex) SearchInto(dst []Node, query []float32, k int) ([]Nod
 			continue
 		}
 
-		local, err := seg.index.SearchInto(buf.local[:0], query, k)
+		var local []Node
+		var err error
+
+		if allow != nil {
+			buf.localIDs = buf.localIDs[:0]
+			if allow.Len() < int(seg.localCount()) {
+				allow.ForEach(func(global uint32) bool {
+					canonSeg, canonLocal, ok := view.resolve(global)
+					if ok && canonSeg == uint32(i) {
+						buf.localIDs = append(buf.localIDs, canonLocal)
+					}
+					return true
+				})
+				slices.Sort(buf.localIDs)
+			} else {
+				for localIdx, global := range seg.localToGlobal {
+					if global != invalidGlobalID && allow.Contains(global) {
+						canonSeg, canonLocal, ok := view.resolve(global)
+						if ok && canonSeg == uint32(i) && canonLocal == uint32(localIdx) {
+							buf.localIDs = append(buf.localIDs, uint32(localIdx))
+						}
+					}
+				}
+			}
+
+			localAllow := NewAllowIDsSorted(buf.localIDs)
+			if planned {
+				local, err = seg.index.SearchPlannedInto(buf.local[:0], query, k, localAllow)
+			} else {
+				local, err = seg.index.SearchAllowedInto(buf.local[:0], query, k, localAllow)
+			}
+		} else {
+			local, err = seg.index.SearchInto(buf.local[:0], query, k)
+		}
+
 		if err != nil {
 			return nil, err
 		}
