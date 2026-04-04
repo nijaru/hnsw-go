@@ -171,16 +171,16 @@ var plannerSpecs = []plannerSpec{
 	{selectivity: "50pct", allowCount: 512, k: 32, correlated: false},
 }
 
-func profileIndexConfig() hnsw.IndexConfig {
+func profileIndexConfig(m int) hnsw.IndexConfig {
 	return hnsw.IndexConfig{
 		Dims:     profileDims,
-		M:        profileM,
-		MMax0:    profileMMax0,
+		M:        uint32(m),
+		MMax0:    uint32(m * 2),
 		MaxLevel: profileMaxLevel,
 	}
 }
 
-func newProfileIndex(capacity int) (*hnsw.Index, func() error, error) {
+func newProfileIndex(capacity, efSearch, m, efConst int) (*hnsw.Index, func() error, error) {
 	if capacity < 1 {
 		capacity = 1
 	}
@@ -191,13 +191,13 @@ func newProfileIndex(capacity int) (*hnsw.Index, func() error, error) {
 	}
 
 	path := filepath.Join(dir, "profile.hnsw")
-	storage, err := hnsw.NewStorage(path, profileIndexConfig(), uint32(capacity))
+	storage, err := hnsw.NewStorage(path, profileIndexConfig(m), uint32(capacity))
 	if err != nil {
 		_ = os.RemoveAll(dir)
 		return nil, nil, err
 	}
 
-	idx := hnsw.NewIndex(storage, hnsw.L2, profileEfSearch, profileEfConst)
+	idx := hnsw.NewIndex(storage, hnsw.L2, efSearch, efConst)
 	cleanup := func() error {
 		var cleanupErr error
 		if err := idx.Close(); err != nil {
@@ -231,7 +231,12 @@ func prepareSearch(ctx *profileContext) error {
 		st.gt = exactSetsForQueries(st.vectors, st.queries, profileSearchK)
 	}
 
-	idx, cleanup, err := newProfileIndex(len(st.vectors))
+	idx, cleanup, err := newProfileIndex(
+		len(st.vectors),
+		ctx.opts.efSearch,
+		ctx.opts.m,
+		ctx.opts.efConst,
+	)
 	if err != nil {
 		return err
 	}
@@ -304,7 +309,12 @@ func prepareFiltered(ctx *profileContext) error {
 	st.query = st.vectors[profileFilteredNodes/2]
 	st.allow = profileAllowList(len(st.vectors), len(st.vectors)/2, 128, true)
 
-	idx, cleanup, err := newProfileIndex(len(st.vectors))
+	idx, cleanup, err := newProfileIndex(
+		len(st.vectors),
+		ctx.opts.efSearch,
+		ctx.opts.m,
+		ctx.opts.efConst,
+	)
 	if err != nil {
 		return err
 	}
@@ -356,7 +366,12 @@ func prepareBuild(ctx *profileContext) error {
 		vectors: profileVectors(profileNodes, profileDims, 0x11, 0x22),
 	}
 
-	idx, cleanup, err := newProfileIndex(len(st.vectors))
+	idx, cleanup, err := newProfileIndex(
+		len(st.vectors),
+		ctx.opts.efSearch,
+		ctx.opts.m,
+		ctx.opts.efConst,
+	)
 	if err != nil {
 		return err
 	}
@@ -389,7 +404,12 @@ func prepareDelete(ctx *profileContext) error {
 		deleteIDs: profileDeleteIDs(profileNodes, profileDeleteCount),
 	}
 
-	idx, cleanup, err := newProfileIndex(len(st.vectors))
+	idx, cleanup, err := newProfileIndex(
+		len(st.vectors),
+		ctx.opts.efSearch,
+		ctx.opts.m,
+		ctx.opts.efConst,
+	)
 	if err != nil {
 		return err
 	}
@@ -428,7 +448,12 @@ func prepareVacuum(ctx *profileContext) error {
 		deleteIDs: profileDeleteIDs(profileNodes, profileDeleteCount),
 	}
 
-	idx, cleanup, err := newProfileIndex(len(st.vectors))
+	idx, cleanup, err := newProfileIndex(
+		len(st.vectors),
+		ctx.opts.efSearch,
+		ctx.opts.m,
+		ctx.opts.efConst,
+	)
 	if err != nil {
 		return err
 	}
@@ -466,7 +491,12 @@ func preparePlanner(ctx *profileContext) error {
 	}
 	st.query = st.vectors[profileFilteredNodes/2]
 
-	idx, cleanup, err := newProfileIndex(len(st.vectors))
+	idx, cleanup, err := newProfileIndex(
+		len(st.vectors),
+		ctx.opts.efSearch,
+		ctx.opts.m,
+		ctx.opts.efConst,
+	)
 	if err != nil {
 		return err
 	}

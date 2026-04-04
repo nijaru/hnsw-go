@@ -5,6 +5,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"os"
+	"reflect"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -13,6 +14,7 @@ import (
 type Index struct {
 	storage    *Storage
 	distFunc   DistanceFunc
+	isL2       bool
 	mu         sync.RWMutex
 	entryPoint uint32
 	maxLevel   int
@@ -43,6 +45,7 @@ func NewIndex(storage *Storage, distFunc DistanceFunc, efSearch, efConst int) *I
 	idx := &Index{
 		storage:    storage,
 		distFunc:   distFunc,
+		isL2:       reflect.ValueOf(distFunc).Pointer() == reflect.ValueOf(L2).Pointer(),
 		m:          m,
 		mMax0:      mMax0,
 		efSearch:   efSearch,
@@ -62,6 +65,13 @@ func NewIndex(storage *Storage, distFunc DistanceFunc, efSearch, efConst int) *I
 	idx.nodeCount = storage.readUint32(28)
 
 	return idx
+}
+
+func (idx *Index) dist(a, b []float32) float32 {
+	if idx.isL2 {
+		return L2(a, b)
+	}
+	return idx.distFunc(a, b)
 }
 
 func (idx *Index) SetProbes(probes int) {
@@ -307,7 +317,7 @@ func (idx *Index) searchIntoWithFilters(
 
 	var probeBuf [64]Node
 	probeNodes := probeBuf[:0]
-	currDist := idx.distFunc(query, idx.storage.GetVector(currEntryPoint))
+	currDist := idx.dist(query, idx.storage.GetVector(currEntryPoint))
 	probeNodes = append(probeNodes, Node{ID: currEntryPoint, Distance: currDist})
 
 	for level := currMaxLevel; level >= 1; level-- {
@@ -317,7 +327,7 @@ func (idx *Index) searchIntoWithFilters(
 			best := probeNodes[0]
 			neighbors := idx.storage.GetNeighbors(best.ID, level)
 			for _, nb := range neighbors {
-				d := idx.distFunc(query, idx.storage.GetVector(nb))
+				d := idx.dist(query, idx.storage.GetVector(nb))
 				if d < best.Distance {
 					best.Distance = d
 					best.ID = nb
@@ -333,7 +343,7 @@ func (idx *Index) searchIntoWithFilters(
 			best := probeNodes[0]
 			neighbors := idx.storage.GetNeighbors(best.ID, level)
 			for _, nb := range neighbors {
-				d := idx.distFunc(query, idx.storage.GetVector(nb))
+				d := idx.dist(query, idx.storage.GetVector(nb))
 				exists := false
 				for _, p := range probeNodes {
 					if p.ID == nb {
@@ -401,7 +411,7 @@ func (idx *Index) searchIntoWithFilters(
 			}
 			buf.visit(nb)
 
-			d := idx.distFunc(query, idx.storage.GetVector(nb))
+			d := idx.dist(query, idx.storage.GetVector(nb))
 			allowed := true
 			if len(allow.IDs) > 0 || len(allow.Bits) > 0 {
 				allowed = allow.Contains(nb)
@@ -469,7 +479,7 @@ func (idx *Index) searchIntoNoFilter(
 
 	var probeBuf [64]Node
 	probeNodes := probeBuf[:0]
-	currDist := idx.distFunc(query, idx.storage.GetVector(currEntryPoint))
+	currDist := idx.dist(query, idx.storage.GetVector(currEntryPoint))
 	probeNodes = append(probeNodes, Node{ID: currEntryPoint, Distance: currDist})
 
 	for level := currMaxLevel; level >= 1; level-- {
@@ -480,7 +490,7 @@ func (idx *Index) searchIntoNoFilter(
 			best := probeNodes[0]
 			neighbors := idx.storage.GetNeighbors(best.ID, level)
 			for _, nb := range neighbors {
-				d := idx.distFunc(query, idx.storage.GetVector(nb))
+				d := idx.dist(query, idx.storage.GetVector(nb))
 				if d < best.Distance {
 					best.Distance = d
 					best.ID = nb
@@ -497,7 +507,7 @@ func (idx *Index) searchIntoNoFilter(
 			best := probeNodes[0]
 			neighbors := idx.storage.GetNeighbors(best.ID, level)
 			for _, nb := range neighbors {
-				d := idx.distFunc(query, idx.storage.GetVector(nb))
+				d := idx.dist(query, idx.storage.GetVector(nb))
 
 				// Check if already in probes
 				exists := false
@@ -548,21 +558,82 @@ func (idx *Index) searchIntoNoFilter(
 			break
 		}
 
-		neighbors := idx.storage.GetNeighbors(c.ID, 0)
-		for _, nb := range neighbors {
-			if buf.isVisited(nb) {
-				continue
+		// Prefetch the vector of the next candidate in the heap to hide memory latency.
+		if len(buf.candidates.Nodes) > 0 {
+			nextC := buf.candidates.Nodes[0]
+			v := idx.storage.GetVector(nextC.ID)
+			if len(v) > 0 {
+				_ = v[0]
 			}
-			buf.visit(nb)
+		}
 
-			d := idx.distFunc(query, idx.storage.GetVector(nb))
-			if len(buf.results.Nodes) < efSearch || d < f.Distance {
-				buf.candidates.Push(Node{ID: nb, Distance: d})
-				buf.results.Push(Node{ID: nb, Distance: d})
-				if len(buf.results.Nodes) > efSearch {
-					buf.results.Pop()
+		neighbors := idx.storage.GetNeighbors(c.ID, 0)
+		var filtered [64]uint32
+		count := 0
+		for _, nb := range neighbors {
+			if !buf.isVisited(nb) {
+				buf.visit(nb)
+				filtered[count] = nb
+				count++
+			}
+		}
+
+		if count == 0 {
+			continue
+		}
+
+		if idx.isL2 {
+			i := 0
+			for ; i <= count-2; i += 2 {
+				nb1 := filtered[i]
+				nb2 := filtered[i+1]
+				d1, d2 := L2Two(query, idx.storage.GetVector(nb1), idx.storage.GetVector(nb2))
+
+				if len(buf.results.Nodes) < efSearch || d1 < f.Distance {
+					node := Node{ID: nb1, Distance: d1}
+					buf.candidates.Push(node)
+					buf.results.Push(node)
+					if len(buf.results.Nodes) > efSearch {
+						buf.results.Pop()
+					}
+					f = buf.results.Nodes[0]
 				}
-				f = buf.results.Nodes[0]
+				if len(buf.results.Nodes) < efSearch || d2 < f.Distance {
+					node := Node{ID: nb2, Distance: d2}
+					buf.candidates.Push(node)
+					buf.results.Push(node)
+					if len(buf.results.Nodes) > efSearch {
+						buf.results.Pop()
+					}
+					f = buf.results.Nodes[0]
+				}
+			}
+			if i < count {
+				nb := filtered[i]
+				d := L2(query, idx.storage.GetVector(nb))
+				if len(buf.results.Nodes) < efSearch || d < f.Distance {
+					node := Node{ID: nb, Distance: d}
+					buf.candidates.Push(node)
+					buf.results.Push(node)
+					if len(buf.results.Nodes) > efSearch {
+						buf.results.Pop()
+					}
+					f = buf.results.Nodes[0]
+				}
+			}
+		} else {
+			for i := 0; i < count; i++ {
+				nb := filtered[i]
+				d := idx.dist(query, idx.storage.GetVector(nb))
+				if len(buf.results.Nodes) < efSearch || d < f.Distance {
+					node := Node{ID: nb, Distance: d}
+					buf.candidates.Push(node)
+					buf.results.Push(node)
+					if len(buf.results.Nodes) > efSearch {
+						buf.results.Pop()
+					}
+					f = buf.results.Nodes[0]
+				}
 			}
 		}
 	}
@@ -606,7 +677,7 @@ func (idx *Index) searchExactAllowedInto(
 	results := &buf.results
 	allow.ForEach(func(id uint32) bool {
 		if !idx.storage.IsDeleted(id) {
-			d := idx.distFunc(query, idx.storage.GetVector(id))
+			d := idx.dist(query, idx.storage.GetVector(id))
 			results.Push(Node{ID: id, Distance: d})
 			if len(results.Nodes) > k {
 				results.Pop()
@@ -731,7 +802,7 @@ func (idx *Index) insert(id uint32, vec []float32, meta []byte) error {
 	nodeCount := idx.nodeCount
 
 	currNode := currEntryPoint
-	currDist := idx.distFunc(vec, idx.storage.GetVector(currNode))
+	currDist := idx.dist(vec, idx.storage.GetVector(currNode))
 
 	for l := currMaxLevel; l > level; l-- {
 		changed := true
@@ -739,7 +810,7 @@ func (idx *Index) insert(id uint32, vec []float32, meta []byte) error {
 			changed = false
 			neighbors := idx.storage.GetNeighbors(currNode, l)
 			for _, nb := range neighbors {
-				d := idx.distFunc(vec, idx.storage.GetVector(nb))
+				d := idx.dist(vec, idx.storage.GetVector(nb))
 				if d < currDist {
 					currDist = d
 					currNode = nb
@@ -823,7 +894,7 @@ func (idx *Index) findNeighborsAtLayer(
 ) []Node {
 	buf.reset(nodeCount)
 
-	dist := idx.distFunc(vec, idx.storage.GetVector(entry))
+	dist := idx.dist(vec, idx.storage.GetVector(entry))
 	buf.candidates.Push(Node{ID: entry, Distance: dist})
 	buf.results.Push(Node{ID: entry, Distance: dist})
 	buf.visit(entry)
@@ -843,7 +914,7 @@ func (idx *Index) findNeighborsAtLayer(
 			}
 			buf.visit(nb)
 
-			d := idx.distFunc(vec, idx.storage.GetVector(nb))
+			d := idx.dist(vec, idx.storage.GetVector(nb))
 			if len(buf.results.Nodes) < ef || d < f.Distance {
 				buf.candidates.Push(Node{ID: nb, Distance: d})
 				buf.results.Push(Node{ID: nb, Distance: d})
@@ -891,7 +962,7 @@ func (idx *Index) selectNeighbors(candidates []Node, m int) []uint32 {
 
 		isDiverse := true
 		for _, r := range result {
-			distToResult := idx.distFunc(idx.storage.GetVector(c.ID), idx.storage.GetVector(r.ID))
+			distToResult := idx.dist(idx.storage.GetVector(c.ID), idx.storage.GetVector(r.ID))
 			if distToResult < c.Distance {
 				isDiverse = false
 				break
@@ -934,7 +1005,7 @@ func (idx *Index) shrinkNeighbors(neighbors []uint32, vec []float32, limit int) 
 	}
 
 	for _, nb := range neighbors {
-		nodes = append(nodes, Node{ID: nb, Distance: idx.distFunc(vec, idx.storage.GetVector(nb))})
+		nodes = append(nodes, Node{ID: nb, Distance: idx.dist(vec, idx.storage.GetVector(nb))})
 	}
 
 	var heapBuf [128]Node
@@ -1046,7 +1117,7 @@ func (idx *Index) repairNeighborConnection(id uint32) {
 			// Add u's current neighbors (except id)
 			for _, nbID := range uNb {
 				if !seen[nbID] {
-					d := idx.distFunc(uVec, idx.storage.GetVector(nbID))
+					d := idx.dist(uVec, idx.storage.GetVector(nbID))
 					candidates = append(candidates, Node{ID: nbID, Distance: d})
 					seen[nbID] = true
 				}
@@ -1054,7 +1125,7 @@ func (idx *Index) repairNeighborConnection(id uint32) {
 			// Add id's neighbors
 			for _, nbID := range neighbors {
 				if !seen[nbID] {
-					d := idx.distFunc(uVec, idx.storage.GetVector(nbID))
+					d := idx.dist(uVec, idx.storage.GetVector(nbID))
 					candidates = append(candidates, Node{ID: nbID, Distance: d})
 					seen[nbID] = true
 				}

@@ -15,6 +15,9 @@ type options struct {
 	profileDir string
 	repeats    int
 	siftPath   string
+	efSearch   int
+	m          int
+	efConst    int
 }
 
 func main() {
@@ -33,6 +36,9 @@ func main() {
 		"",
 		"optional path to sift10k_test.bin for the search workload",
 	)
+	flag.IntVar(&opts.efSearch, "ef-search", 200, "efSearch value for index")
+	flag.IntVar(&opts.m, "m", 16, "M value for index")
+	flag.IntVar(&opts.efConst, "ef-const", 200, "efConst value for index")
 	flag.Parse()
 
 	if opts.siftPath == "" && flag.NArg() > 0 {
