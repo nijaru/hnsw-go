@@ -2,6 +2,7 @@ package hnsw
 
 import (
 	"bytes"
+	"runtime/debug"
 	"testing"
 )
 
@@ -50,11 +51,21 @@ func TestSearchFiltered(t *testing.T) {
 	filter := func(n Node) bool {
 		return bytes.HasPrefix(n.Metadata, prefix)
 	}
+
+	oldGC := debug.SetGCPercent(-1)
+	defer debug.SetGCPercent(oldGC)
+
+	var warmErr error
+	dst, warmErr = idx.SearchFilteredInto(dst[:0], vecs[0], 3, filter)
+	if warmErr != nil {
+		t.Fatalf("SearchFilteredInto warmup failed: %v", warmErr)
+	}
+
 	allocs := testing.AllocsPerRun(100, func() {
-		var err error
-		dst, err = idx.SearchFilteredInto(dst[:0], vecs[0], 3, filter)
-		if err != nil {
-			t.Fatalf("SearchFilteredInto failed: %v", err)
+		var runErr error
+		dst, runErr = idx.SearchFilteredInto(dst[:0], vecs[0], 3, filter)
+		if runErr != nil {
+			t.Fatalf("SearchFilteredInto failed: %v", runErr)
 		}
 	})
 	if allocs != 0 {

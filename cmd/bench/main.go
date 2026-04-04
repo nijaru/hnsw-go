@@ -1,215 +1,186 @@
 package main
 
 import (
-	"encoding/binary"
+	"flag"
 	"fmt"
-	"math"
 	"os"
-	"sort"
-	"time"
-
-	"github.com/omendb/hnsw-go"
+	"path/filepath"
+	"runtime"
+	"runtime/pprof"
+	"strings"
 )
 
+type options struct {
+	workload   string
+	profileDir string
+	repeats    int
+	siftPath   string
+}
+
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: bench <sift10k_test.bin>")
-		os.Exit(1)
+	var opts options
+	flag.StringVar(
+		&opts.workload,
+		"workload",
+		"all",
+		"workload(s) to run: search, filtered, build, delete, vacuum, planner, all",
+	)
+	flag.StringVar(&opts.profileDir, "profile-dir", "", "directory for CPU and heap profiles")
+	flag.IntVar(&opts.repeats, "repeats", 4, "repeat count for query-heavy workloads")
+	flag.StringVar(
+		&opts.siftPath,
+		"sift",
+		"",
+		"optional path to sift10k_test.bin for the search workload",
+	)
+	flag.Parse()
+
+	if opts.siftPath == "" && flag.NArg() > 0 {
+		opts.siftPath = flag.Arg(0)
 	}
-	data, err := os.ReadFile(os.Args[1])
-	if err != nil {
+
+	if err := run(opts); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-
-	vectors, queries, gt := parseSIFT(data)
-	fmt.Printf("SIFT 10k: %d vectors, %d queries, %d dims, topK=%d\n\n",
-		len(vectors), len(queries), len(vectors[0]), len(gt[0]))
-
-	benchmarkBuild(vectors)
-	benchmarkSearch(vectors, queries, gt)
 }
 
-func parseSIFT(data []byte) (vectors, queries [][]float32, gt [][]int32) {
-	r := &binReader{data: data}
-	nVec := r.uint32()
-	nQuery := r.uint32()
-	dims := r.uint32()
-	topK := r.uint32()
-
-	vectors = make([][]float32, nVec)
-	for i := range vectors {
-		vectors[i] = r.float32s(dims)
-	}
-	queries = make([][]float32, nQuery)
-	for i := range queries {
-		queries[i] = r.float32s(dims)
-	}
-	gt = make([][]int32, nQuery)
-	for i := range gt {
-		gt[i] = r.int32s(topK)
-	}
-	return
-}
-
-func benchmarkBuild(vectors [][]float32) {
-	const (
-		M       = 16
-		MMax0   = 32
-		EfConst = 200
-	)
-
-	dims := uint32(len(vectors[0]))
-
-	var best, worst time.Duration
-	var total time.Duration
-	const runs = 5
-
-	for run := 0; run < runs; run++ {
-		path := fmt.Sprintf("%s/bench_build_%d.hnsw", os.TempDir(), os.Getpid())
-		cfg := hnsw.IndexConfig{Dims: dims, M: M, MMax0: MMax0, MaxLevel: 16}
-		storage, err := hnsw.NewStorage(path, cfg, uint32(len(vectors)))
-		if err != nil {
-			panic(err)
-		}
-		idx := hnsw.NewIndex(storage, hnsw.L2, 200, EfConst)
-
-		start := time.Now()
-		for _, vec := range vectors {
-			if err := idx.Insert(vec, nil); err != nil {
-				panic(err)
-			}
-		}
-		elapsed := time.Since(start)
-
-		storage.Close()
-		os.Remove(path)
-		os.Remove(path + ".vec")
-
-		total += elapsed
-		if run == 0 || elapsed < best {
-			best = elapsed
-		}
-		if run == 0 || elapsed > worst {
-			worst = elapsed
-		}
-	}
-
-	avg := total / runs
-	fmt.Println("=== Build ===")
-	fmt.Printf(
-		"  Avg:    %s (%.0f vecs/sec)\n",
-		avg.Round(time.Microsecond),
-		float64(len(vectors))/avg.Seconds(),
-	)
-	fmt.Printf("  Best:   %s\n", best.Round(time.Microsecond))
-	fmt.Printf("  Worst:  %s\n", worst.Round(time.Microsecond))
-	fmt.Println()
-}
-
-func benchmarkSearch(vectors, queries [][]float32, gt [][]int32) {
-	const (
-		M        = 16
-		MMax0    = 32
-		EfSearch = 200
-		K        = 10
-	)
-
-	dims := uint32(len(vectors[0]))
-	path := fmt.Sprintf("%s/bench_search_%d.hnsw", os.TempDir(), os.Getpid())
-	defer os.Remove(path)
-	defer os.Remove(path + ".vec")
-
-	cfg := hnsw.IndexConfig{Dims: dims, M: M, MMax0: MMax0, MaxLevel: 16}
-	storage, err := hnsw.NewStorage(path, cfg, uint32(len(vectors)))
+func run(opts options) error {
+	names, err := selectedWorkloads(opts.workload)
 	if err != nil {
-		panic(err)
-	}
-	defer storage.Close()
-
-	idx := hnsw.NewIndex(storage, hnsw.L2, EfSearch, 200)
-	for _, vec := range vectors {
-		if err := idx.Insert(vec, nil); err != nil {
-			panic(err)
-		}
+		return err
 	}
 
-	latencies := make([]time.Duration, len(queries))
-	totalRecall := 0.0
-
-	for qi, query := range queries {
-		start := time.Now()
-		results, err := idx.Search(query, K)
-		latencies[qi] = time.Since(start)
-		if err != nil {
-			panic(err)
+	for i, name := range names {
+		def, ok := workloadCatalog[name]
+		if !ok {
+			return fmt.Errorf("unknown workload %q", name)
 		}
 
-		gtSet := make(map[uint32]struct{}, K)
-		for i := 0; i < K && i < len(gt[qi]); i++ {
-			gtSet[uint32(gt[qi][i])] = struct{}{}
+		if i > 0 {
+			fmt.Println()
 		}
-		hits := 0
-		for i := 0; i < K && i < len(results); i++ {
-			if _, ok := gtSet[results[i].ID]; ok {
-				hits++
+		fmt.Printf("=== %s ===\n", name)
+
+		if err := runWorkload(def, opts); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func runWorkload(def workloadDefinition, opts options) (err error) {
+	ctx := &profileContext{opts: opts}
+	if def.prepare != nil {
+		if err := def.prepare(ctx); err != nil {
+			if ctx.cleanup != nil {
+				if cleanupErr := ctx.cleanup(); cleanupErr != nil {
+					return fmt.Errorf("%w (cleanup error: %v)", err, cleanupErr)
+				}
 			}
+			return err
 		}
-		totalRecall += float64(hits) / float64(K)
+	}
+	if ctx.cleanup != nil {
+		defer func() {
+			if cleanupErr := ctx.cleanup(); cleanupErr != nil && err == nil {
+				err = cleanupErr
+			}
+		}()
 	}
 
-	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
-	avgRecall := totalRecall / float64(len(queries))
-	var totalTime time.Duration
-	for _, l := range latencies {
-		totalTime += l
-	}
-	qps := float64(len(queries)) / totalTime.Seconds()
-
-	p := func(pct float64) time.Duration {
-		idx := int(float64(len(latencies)-1) * pct)
-		return latencies[idx]
-	}
-
-	fmt.Println("=== Search ===")
-	fmt.Printf("  QPS:      %.0f\n", qps)
-	fmt.Printf("  Recall@%d: %.4f\n", K, avgRecall)
-	fmt.Printf(
-		"  Mean:     %s\n",
-		(totalTime / time.Duration(len(queries))).Round(time.Microsecond),
-	)
-	fmt.Printf("  p50:      %s\n", p(0.50).Round(time.Microsecond))
-	fmt.Printf("  p90:      %s\n", p(0.90).Round(time.Microsecond))
-	fmt.Printf("  p99:      %s\n", p(0.99).Round(time.Microsecond))
-	fmt.Printf("  p99.9:    %s\n", p(0.999).Round(time.Microsecond))
-	fmt.Printf("  Worst:    %s\n", latencies[len(latencies)-1].Round(time.Microsecond))
+	return withProfiles(opts.profileDir, def.name, func() error {
+		return def.run(ctx)
+	})
 }
 
-type binReader struct {
-	data   []byte
-	offset int
-}
-
-func (r *binReader) uint32() uint32 {
-	v := binary.LittleEndian.Uint32(r.data[r.offset:])
-	r.offset += 4
-	return v
-}
-
-func (r *binReader) float32s(n uint32) []float32 {
-	out := make([]float32, n)
-	for i := range out {
-		out[i] = math.Float32frombits(binary.LittleEndian.Uint32(r.data[r.offset:]))
-		r.offset += 4
+func withProfiles(dir, name string, run func() error) (err error) {
+	if dir == "" {
+		return run()
 	}
-	return out
+
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+
+	cpuPath := filepath.Join(dir, name+".cpu.prof")
+	cpuFile, err := os.Create(cpuPath)
+	if err != nil {
+		return err
+	}
+
+	started := false
+	defer func() {
+		if started {
+			pprof.StopCPUProfile()
+		}
+		if closeErr := cpuFile.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+
+	if err := pprof.StartCPUProfile(cpuFile); err != nil {
+		return err
+	}
+	started = true
+
+	err = run()
+	pprof.StopCPUProfile()
+	started = false
+
+	runtime.GC()
+
+	heapPath := filepath.Join(dir, name+".heap.prof")
+	heapFile, heapErr := os.Create(heapPath)
+	if heapErr != nil {
+		if err == nil {
+			err = heapErr
+		}
+		return err
+	}
+	defer func() {
+		if closeErr := heapFile.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+
+	if writeErr := pprof.WriteHeapProfile(heapFile); writeErr != nil && err == nil {
+		err = writeErr
+	}
+	return err
 }
 
-func (r *binReader) int32s(n uint32) []int32 {
-	out := make([]int32, n)
-	for i := range out {
-		out[i] = int32(binary.LittleEndian.Uint32(r.data[r.offset:]))
-		r.offset += 4
+func selectedWorkloads(spec string) ([]string, error) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" || spec == "all" {
+		out := make([]string, len(workloadOrder))
+		copy(out, workloadOrder)
+		return out, nil
 	}
-	return out
+
+	parts := strings.Split(spec, ",")
+	out := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		name := strings.TrimSpace(part)
+		if name == "" {
+			continue
+		}
+		if name == "all" {
+			return selectedWorkloads("all")
+		}
+		if _, ok := workloadCatalog[name]; !ok {
+			return nil, fmt.Errorf("unknown workload %q", name)
+		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no workloads selected")
+	}
+	return out, nil
 }

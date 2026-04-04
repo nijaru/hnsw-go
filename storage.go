@@ -928,3 +928,10 @@ func (s *Storage) setVector(id uint32, vec []float32) {
 	dst := s.GetVector(id)
 	copy(dst, vec)
 }
+
+func (s *Storage) ResetNode(id uint32) {
+	data := s.getGraphNode(id)
+	for i := range data {
+		data[i] = 0
+	}
+}

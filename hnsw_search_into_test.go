@@ -1,6 +1,9 @@
 package hnsw
 
-import "testing"
+import (
+	"runtime/debug"
+	"testing"
+)
 
 func TestSearchIntoZeroAlloc(t *testing.T) {
 	path := "test_search_into.hnsw"
@@ -33,13 +36,26 @@ func TestSearchIntoZeroAlloc(t *testing.T) {
 	query := vecs[16]
 	dst := make([]Node, 0, 8)
 
-	allocs := testing.AllocsPerRun(100, func() {
+	// Keep the pool warm and avoid GC churn while measuring steady-state reuse.
+	allocs := func() float64 {
+		oldGC := debug.SetGCPercent(-1)
+		defer debug.SetGCPercent(oldGC)
+
 		var err error
 		dst, err = idx.SearchInto(dst[:0], query, 8)
 		if err != nil {
-			t.Fatalf("SearchInto failed: %v", err)
+			t.Fatalf("SearchInto warmup failed: %v", err)
 		}
-	})
+
+		return testing.AllocsPerRun(100, func() {
+			var runErr error
+			dst, runErr = idx.SearchInto(dst[:0], query, 8)
+			if runErr != nil {
+				t.Fatalf("SearchInto failed: %v", runErr)
+			}
+		})
+	}()
+
 	if allocs != 0 {
 		t.Fatalf("expected zero allocations, got %f", allocs)
 	}

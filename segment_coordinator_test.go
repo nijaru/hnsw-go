@@ -267,3 +267,49 @@ func TestSegmentedIndexPublishRejectsEmpty(t *testing.T) {
 		t.Fatal("expected empty publish to fail")
 	}
 }
+
+func TestSegmentedIndexSearchAllowed(t *testing.T) {
+	head, headPath := mustSegmentIndex(t, t.TempDir(), "head", []float32{0, 2, 4})
+	frozen, frozenPath := mustSegmentIndex(t, t.TempDir(), "frozen", []float32{1, 3, 5})
+	defer func() {
+		head.Close()
+		removeTestFiles(headPath)
+		frozen.Close()
+		removeTestFiles(frozenPath)
+	}()
+
+	seg, err := NewSegmentedIndexFrom(head, frozen)
+	if err != nil {
+		t.Fatalf("publish failed: %v", err)
+	}
+
+	// global IDs: head (0, 1, 2) values (0, 2, 4)
+	// global IDs: frozen (3, 4, 5) values (1, 3, 5)
+
+	// Allow only global IDs 1 (val 2) and 4 (val 3)
+	allow := NewAllowIDsSorted([]uint32{1, 4})
+
+	query := []float32{2.5}
+	got, err := seg.SearchAllowedInto(make([]Node, 0, 3), query, 3, allow)
+	if err != nil {
+		t.Fatalf("SearchAllowedInto failed: %v", err)
+	}
+
+	if len(got) != 2 {
+		t.Fatalf("got %d results, want 2", len(got))
+	}
+
+	has1 := false
+	has4 := false
+	for _, n := range got {
+		if n.ID == 1 {
+			has1 = true
+		}
+		if n.ID == 4 {
+			has4 = true
+		}
+	}
+	if !has1 || !has4 {
+		t.Errorf("expected IDs 1 and 4, got %v", got)
+	}
+}

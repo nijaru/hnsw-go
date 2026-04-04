@@ -36,6 +36,9 @@ test:
 bench:
 	@go test -v -bench=. -benchmem ./...
 
+profile:
+	@go run ./cmd/bench -workload "$${WORKLOAD:-all}" -profile-dir "$${PROFILE_DIR:-.profiles}" $${PROFILE_ARGS}
+
 build:
 	@go build -v ./...
 
