@@ -7,6 +7,7 @@ import (
 	"os"
 	"slices"
 	"sync"
+	"sync/atomic"
 )
 
 type Index struct {
@@ -22,6 +23,7 @@ type Index struct {
 	efConst    int
 	probes     int
 	pool       sync.Pool
+	scratch    searchBufferSlot
 	freelist   []uint32
 }
 
@@ -51,14 +53,9 @@ func NewIndex(storage *Storage, distFunc DistanceFunc, efSearch, efConst int) *I
 	}
 
 	idx.pool.New = func() any {
-		return &searchBuffer{
-			visited:    make([]uint8, 16384),
-			results:    maxNodeHeap{Nodes: make([]Node, 0, efSearch+mMax0+1)},
-			candidates: nodeHeap{Nodes: make([]Node, 0, efSearch+mMax0+1)},
-			out:        make([]Node, 0, efSearch+1),
-			gen:        1,
-		}
+		return newSearchBuffer(16384, efSearch+mMax0+1, efSearch+1)
 	}
+	idx.scratch.buf.Store(newSearchBuffer(16384, efSearch+mMax0+1, efSearch+1))
 
 	idx.maxLevel = int(storage.readUint32(36))
 	idx.entryPoint = storage.readUint32(24)
@@ -128,7 +125,24 @@ func (idx *Index) Search(query []float32, k int) ([]Node, error) {
 // SearchInto appends up to k search results into dst and returns the slice.
 // Passing a preallocated dst keeps the hot path allocation-free.
 func (idx *Index) SearchInto(dst []Node, query []float32, k int) ([]Node, error) {
-	return idx.searchInto(dst, query, k, nil)
+	return idx.searchIntoNoFilter(dst, query, k)
+}
+
+// SearchAllowed returns results satisfying the allow-list.
+func (idx *Index) SearchAllowed(query []float32, k int, allow AllowList) ([]Node, error) {
+	return idx.SearchAllowedInto(nil, query, k, allow)
+}
+
+// SearchAllowedInto appends up to k results satisfying allow.
+func (idx *Index) SearchAllowedInto(
+	dst []Node,
+	query []float32,
+	k int,
+	allow AllowList,
+) ([]Node, error) {
+	buf := idx.acquireSearchBuffer()
+	defer idx.releaseSearchBuffer(buf)
+	return idx.searchIntoWithFilters(dst, query, k, allow, nil, false, buf)
 }
 
 // SearchFiltered returns up to k results that satisfy allow.
@@ -143,7 +157,104 @@ func (idx *Index) SearchFilteredInto(
 	k int,
 	allow func(Node) bool,
 ) ([]Node, error) {
-	return idx.searchInto(dst, query, k, allow)
+	buf := idx.acquireSearchBuffer()
+	defer idx.releaseSearchBuffer(buf)
+	return idx.searchIntoWithFilters(dst, query, k, AllowList{}, allow, false, buf)
+}
+
+// SearchPlanned returns results using a planned filtered search strategy.
+func (idx *Index) SearchPlanned(query []float32, k int, allow AllowList) ([]Node, error) {
+	return idx.SearchPlannedInto(nil, query, k, allow)
+}
+
+// SearchPlannedInto appends results using a planned filtered search strategy.
+func (idx *Index) SearchPlannedInto(
+	dst []Node,
+	query []float32,
+	k int,
+	allow AllowList,
+) ([]Node, error) {
+	buf := idx.acquireSearchBuffer()
+	defer idx.releaseSearchBuffer(buf)
+	return idx.searchPlannedInto(dst, query, k, allow, buf)
+}
+
+func (idx *Index) searchPlannedInto(
+	dst []Node,
+	query []float32,
+	k int,
+	allow AllowList,
+	buf *searchBuffer,
+) ([]Node, error) {
+	plan := chooseSearchPlan(allow.Len(), k, idx.nodeCount, idx.efSearch)
+	switch plan {
+	case searchPlanExact:
+		return idx.searchExactAllowedInto(dst, query, k, allow, buf)
+	case searchPlanStandard:
+		return idx.searchIntoPostFilterAllow(dst, query, k, allow)
+	case searchPlanFiltered:
+		return idx.searchIntoWithFilters(dst, query, k, allow, nil, true, buf)
+	default:
+		return idx.searchIntoWithFilters(dst, query, k, allow, nil, true, buf)
+	}
+}
+
+func (idx *Index) searchIntoPostFilterAllow(
+	dst []Node,
+	query []float32,
+	k int,
+	allow AllowList,
+) ([]Node, error) {
+	res, err := idx.searchIntoNoFilter(nil, query, k*10)
+	if err != nil {
+		return nil, err
+	}
+
+	filtered := dst[:0]
+	for _, n := range res {
+		if allow.Contains(n.ID) {
+			filtered = append(filtered, n)
+			if len(filtered) >= k {
+				break
+			}
+		}
+	}
+	return filtered, nil
+}
+
+type searchPlan int
+
+const (
+	searchPlanExact searchPlan = iota
+	searchPlanStandard
+	searchPlanFiltered
+)
+
+func chooseSearchPlan(allowLen, k int, totalNodes uint32, efSearch int) searchPlan {
+	if allowLen == 0 {
+		return searchPlanStandard
+	}
+	if allowLen < efSearch*2 {
+		return searchPlanExact
+	}
+	if float64(allowLen)/float64(totalNodes) > 0.4 {
+		return searchPlanStandard
+	}
+	return searchPlanFiltered
+}
+
+func (idx *Index) acquireSearchBuffer() *searchBuffer {
+	if b := idx.scratch.buf.Swap(nil); b != nil {
+		return b
+	}
+	return idx.pool.Get().(*searchBuffer)
+}
+
+func (idx *Index) releaseSearchBuffer(b *searchBuffer) {
+	if idx.scratch.buf.CompareAndSwap(nil, b) {
+		return
+	}
+	idx.pool.Put(b)
 }
 
 // CopyMetadata returns a detached copy of a node's metadata bytes.
@@ -161,11 +272,176 @@ func (idx *Index) CopyMetadata(id uint32) []byte {
 	return out
 }
 
-func (idx *Index) searchInto(
+func (idx *Index) searchIntoWithFilters(
 	dst []Node,
 	query []float32,
 	k int,
-	allow func(Node) bool,
+	allow AllowList,
+	allowNode func(Node) bool,
+	planned bool,
+	buf *searchBuffer,
+) ([]Node, error) {
+	if len(query) != int(idx.storage.config.Dims) {
+		return nil, fmt.Errorf(
+			"hnsw: query dims %d != index dims %d",
+			len(query),
+			idx.storage.config.Dims,
+		)
+	}
+	if k <= 0 {
+		return nil, nil
+	}
+
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+
+	if idx.nodeCount == 0 {
+		return nil, nil
+	}
+
+	currMaxLevel := idx.maxLevel
+	currEntryPoint := idx.entryPoint
+	nodeCount := idx.nodeCount
+	efSearch := idx.efSearch
+	probes := idx.probes
+
+	var probeBuf [64]Node
+	probeNodes := probeBuf[:0]
+	currDist := idx.distFunc(query, idx.storage.GetVector(currEntryPoint))
+	probeNodes = append(probeNodes, Node{ID: currEntryPoint, Distance: currDist})
+
+	for level := currMaxLevel; level >= 1; level-- {
+		changed := true
+		for changed {
+			changed = false
+			best := probeNodes[0]
+			neighbors := idx.storage.GetNeighbors(best.ID, level)
+			for _, nb := range neighbors {
+				d := idx.distFunc(query, idx.storage.GetVector(nb))
+				if d < best.Distance {
+					best.Distance = d
+					best.ID = nb
+					changed = true
+				}
+			}
+			if changed {
+				probeNodes[0] = best
+			}
+		}
+
+		if probes > 1 {
+			best := probeNodes[0]
+			neighbors := idx.storage.GetNeighbors(best.ID, level)
+			for _, nb := range neighbors {
+				d := idx.distFunc(query, idx.storage.GetVector(nb))
+				exists := false
+				for _, p := range probeNodes {
+					if p.ID == nb {
+						exists = true
+						break
+					}
+				}
+				if exists {
+					continue
+				}
+
+				if len(probeNodes) < probes {
+					probeNodes = append(probeNodes, Node{ID: nb, Distance: d})
+					for i := len(probeNodes) - 1; i > 0 && probeNodes[i].Distance < probeNodes[i-1].Distance; i-- {
+						probeNodes[i], probeNodes[i-1] = probeNodes[i-1], probeNodes[i]
+					}
+				} else if d < probeNodes[len(probeNodes)-1].Distance {
+					probeNodes[len(probeNodes)-1] = Node{ID: nb, Distance: d}
+					for i := len(probeNodes) - 1; i > 0 && probeNodes[i].Distance < probeNodes[i-1].Distance; i-- {
+						probeNodes[i], probeNodes[i-1] = probeNodes[i-1], probeNodes[i]
+					}
+				}
+			}
+		}
+	}
+
+	buf.reset(nodeCount)
+
+	for _, p := range probeNodes {
+		buf.candidates.Push(p)
+		allowed := true
+		if len(allow.IDs) > 0 || len(allow.Bits) > 0 {
+			allowed = allow.Contains(p.ID)
+		} else if allowNode != nil {
+			p.Metadata = idx.storage.GetMetadata(p.ID)
+			allowed = allowNode(p)
+		}
+
+		if allowed {
+			buf.results.Push(p)
+			if len(buf.results.Nodes) > efSearch {
+				buf.results.Pop()
+			}
+		}
+		buf.visit(p.ID)
+	}
+
+	hasResults := len(buf.results.Nodes) > 0
+	var bestDist float32
+	if hasResults {
+		bestDist = buf.results.Nodes[0].Distance
+	}
+
+	for len(buf.candidates.Nodes) > 0 {
+		c := buf.candidates.Pop()
+
+		if hasResults && c.Distance > bestDist && len(buf.results.Nodes) >= efSearch {
+			break
+		}
+
+		neighbors := idx.storage.GetNeighbors(c.ID, 0)
+		for _, nb := range neighbors {
+			if buf.isVisited(nb) {
+				continue
+			}
+			buf.visit(nb)
+
+			d := idx.distFunc(query, idx.storage.GetVector(nb))
+			allowed := true
+			if len(allow.IDs) > 0 || len(allow.Bits) > 0 {
+				allowed = allow.Contains(nb)
+			} else if allowNode != nil {
+				n := Node{ID: nb, Distance: d}
+				n.Metadata = idx.storage.GetMetadata(nb)
+				allowed = allowNode(n)
+			}
+
+			if !hasResults || len(buf.results.Nodes) < efSearch || d < bestDist {
+				buf.candidates.Push(Node{ID: nb, Distance: d})
+				if allowed {
+					buf.results.Push(Node{ID: nb, Distance: d})
+					if len(buf.results.Nodes) > efSearch {
+						buf.results.Pop()
+					}
+					bestDist = buf.results.Nodes[0].Distance
+					hasResults = true
+				}
+			}
+		}
+	}
+
+	for len(buf.results.Nodes) > 0 {
+		n := buf.results.Pop()
+		if !idx.storage.IsDeleted(n.ID) {
+			n.Metadata = idx.storage.GetMetadata(n.ID)
+			buf.out = append(buf.out, n)
+		}
+	}
+	slices.Reverse(buf.out)
+
+	actualK := min(k, len(buf.out))
+	return append(dst[:0], buf.out[:actualK]...), nil
+}
+
+func (idx *Index) searchIntoNoFilter(
+	dst []Node,
+	query []float32,
+	k int,
 ) ([]Node, error) {
 	if len(query) != int(idx.storage.config.Dims) {
 		return nil, fmt.Errorf(
@@ -251,8 +527,8 @@ func (idx *Index) searchInto(
 		}
 	}
 
-	buf := idx.pool.Get().(*searchBuffer)
-	defer idx.pool.Put(buf)
+	buf := idx.acquireSearchBuffer()
+	defer idx.releaseSearchBuffer(buf)
 	buf.reset(nodeCount)
 
 	for _, p := range probeNodes {
@@ -296,9 +572,6 @@ func (idx *Index) searchInto(
 		if !idx.storage.IsDeleted(n.ID) {
 			// Fetch metadata only for the results
 			n.Metadata = idx.storage.GetMetadata(n.ID)
-			if allow != nil && !allow(n) {
-				continue
-			}
 			buf.out = append(buf.out, n)
 		}
 	}
@@ -308,15 +581,70 @@ func (idx *Index) searchInto(
 	return append(dst[:0], buf.out[:actualK]...), nil
 }
 
-func (idx *Index) Insert(vec []float32, meta []byte) error {
-	if len(vec) != int(idx.storage.config.Dims) {
-		return fmt.Errorf(
-			"hnsw: vector dims %d != index dims %d",
-			len(vec),
+func (idx *Index) searchExactAllowedInto(
+	dst []Node,
+	query []float32,
+	k int,
+	allow AllowList,
+	buf *searchBuffer,
+) ([]Node, error) {
+	if len(query) != int(idx.storage.config.Dims) {
+		return nil, fmt.Errorf(
+			"hnsw: query dims %d != index dims %d",
+			len(query),
 			idx.storage.config.Dims,
 		)
 	}
-	return idx.BatchInsert([][]float32{vec}, [][]byte{meta})
+	if k <= 0 {
+		return nil, nil
+	}
+
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+
+	buf.reset(idx.nodeCount)
+	results := &buf.results
+	allow.ForEach(func(id uint32) bool {
+		if !idx.storage.IsDeleted(id) {
+			d := idx.distFunc(query, idx.storage.GetVector(id))
+			results.Push(Node{ID: id, Distance: d})
+			if len(results.Nodes) > k {
+				results.Pop()
+			}
+		}
+		return true
+	})
+
+	out := dst[:0]
+	for len(results.Nodes) > 0 {
+		n := results.Pop()
+		n.Metadata = idx.storage.GetMetadata(n.ID)
+		out = append(out, n)
+	}
+	slices.Reverse(out)
+	return out, nil
+}
+
+func (idx *Index) Insert(vec []float32, meta []byte) error {
+	id, err := idx.storage.addNode()
+	if err != nil {
+		return err
+	}
+	atomic.StoreUint32(&idx.nodeCount, id+1)
+	return idx.insert(id, vec, meta)
+}
+
+func (idx *Index) Replace(id uint32, vec []float32, meta []byte) error {
+	return idx.insert(id, vec, meta)
+}
+
+func (idx *Index) Reinsert(id uint32, vec []float32, meta []byte) error {
+	idx.storage.SetDeleted(id, false)
+	return idx.insert(id, vec, meta)
+}
+
+func (idx *Index) Rebuild() error {
+	return idx.Vacuum()
 }
 
 func (idx *Index) BatchInsert(vecs [][]float32, metas [][]byte) error {

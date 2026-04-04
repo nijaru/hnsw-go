@@ -1,5 +1,7 @@
 package hnsw
 
+import "sync/atomic"
+
 type Node struct {
 	ID       uint32
 	Distance float32
@@ -98,17 +100,31 @@ type searchBuffer struct {
 	gen        uint8
 }
 
-func (b *searchBuffer) isVisited(id uint32) bool {
-	if int(id) >= len(b.visited) {
-		return false
+func newSearchBuffer(visitedCap, heapCap, outCap int) *searchBuffer {
+	if visitedCap < 1 {
+		visitedCap = 1
 	}
+	if heapCap < 1 {
+		heapCap = 1
+	}
+	if outCap < 1 {
+		outCap = 1
+	}
+
+	return &searchBuffer{
+		visited:    make([]uint8, visitedCap),
+		results:    maxNodeHeap{Nodes: make([]Node, 0, heapCap)},
+		candidates: nodeHeap{Nodes: make([]Node, 0, heapCap)},
+		out:        make([]Node, 0, outCap),
+		gen:        1,
+	}
+}
+
+func (b *searchBuffer) isVisited(id uint32) bool {
 	return b.visited[id] == b.gen
 }
 
 func (b *searchBuffer) visit(id uint32) {
-	if int(id) >= len(b.visited) {
-		return
-	}
 	b.visited[id] = b.gen
 }
 
@@ -127,4 +143,8 @@ func (b *searchBuffer) reset(maxNodes uint32) {
 	b.results.Nodes = b.results.Nodes[:0]
 	b.candidates.Nodes = b.candidates.Nodes[:0]
 	b.out = b.out[:0]
+}
+
+type searchBufferSlot struct {
+	buf atomic.Pointer[searchBuffer]
 }
