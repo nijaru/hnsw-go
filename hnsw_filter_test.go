@@ -7,8 +7,7 @@ import (
 )
 
 func TestSearchFiltered(t *testing.T) {
-	path := "test_search_filtered.hnsw"
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/test_search_filtered.hnsw"
 
 	config := IndexConfig{
 		Dims:     8,
@@ -86,8 +85,7 @@ func TestSearchFiltered(t *testing.T) {
 }
 
 func TestCopyMetadata(t *testing.T) {
-	path := "test_copy_metadata.hnsw"
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/test_copy_metadata.hnsw"
 
 	config := IndexConfig{
 		Dims:     4,

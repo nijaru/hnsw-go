@@ -50,11 +50,11 @@ func (h *nodeHeap) Pop() Node {
 	return n
 }
 
-type maxNodeHeap struct {
+type NodeMaxHeap struct {
 	Nodes []Node
 }
 
-func (h *maxNodeHeap) Push(n Node) {
+func (h *NodeMaxHeap) Push(n Node) {
 	h.Nodes = append(h.Nodes, n)
 	i := len(h.Nodes) - 1
 	for i > 0 {
@@ -67,7 +67,7 @@ func (h *maxNodeHeap) Push(n Node) {
 	}
 }
 
-func (h *maxNodeHeap) Pop() Node {
+func (h *NodeMaxHeap) Pop() Node {
 	n := h.Nodes[0]
 	last := len(h.Nodes) - 1
 	h.Nodes[0] = h.Nodes[last]
@@ -94,7 +94,7 @@ func (h *maxNodeHeap) Pop() Node {
 
 type searchBuffer struct {
 	visited    []uint8
-	results    maxNodeHeap
+	results    NodeMaxHeap
 	candidates nodeHeap
 	out        []Node
 	gen        uint8
@@ -113,7 +113,7 @@ func newSearchBuffer(visitedCap, heapCap, outCap int) *searchBuffer {
 
 	return &searchBuffer{
 		visited:    make([]uint8, visitedCap),
-		results:    maxNodeHeap{Nodes: make([]Node, 0, heapCap)},
+		results:    NodeMaxHeap{Nodes: make([]Node, 0, heapCap)},
 		candidates: nodeHeap{Nodes: make([]Node, 0, heapCap)},
 		out:        make([]Node, 0, outCap),
 		gen:        1,

@@ -1,10 +1,23 @@
-package hnsw
+package segment
 
 import (
 	"fmt"
+	"math/rand/v2"
 	"runtime/debug"
 	"slices"
 	"testing"
+
+	"github.com/omendb/hnsw-go"
+)
+
+const (
+	segBenchNodes    = 10_000
+	segBenchM        = 16
+	segBenchMMax0    = 32
+	segBenchMaxLevel = 16
+	segBenchEfSearch = 200
+	segBenchEfConst  = 200
+	segBenchSearchK  = 10
 )
 
 func TestSegmentedIndexSearchMergesTopK(t *testing.T) {
@@ -14,11 +27,11 @@ func TestSegmentedIndexSearchMergesTopK(t *testing.T) {
 		if err := head.Close(); err != nil {
 			t.Fatalf("close head: %v", err)
 		}
-		removeTestFiles(headPath)
 		if err := frozen.Close(); err != nil {
 			t.Fatalf("close frozen: %v", err)
 		}
-		removeTestFiles(frozenPath)
+		_ = headPath
+		_ = frozenPath
 	}()
 
 	seg, err := NewSegmentedIndexFrom(head, frozen)
@@ -27,7 +40,7 @@ func TestSegmentedIndexSearchMergesTopK(t *testing.T) {
 	}
 
 	query := []float32{1.4}
-	results, err := seg.SearchInto(make([]Node, 0, 2), query, 2)
+	results, err := seg.SearchInto(make([]hnsw.Node, 0, 2), query, 2)
 	if err != nil {
 		t.Fatalf("SearchInto failed: %v", err)
 	}
@@ -50,11 +63,11 @@ func TestSegmentedIndexSearchRemapsFrozenIDs(t *testing.T) {
 		if err := head.Close(); err != nil {
 			t.Fatalf("close head: %v", err)
 		}
-		removeTestFiles(headPath)
 		if err := frozen.Close(); err != nil {
 			t.Fatalf("close frozen: %v", err)
 		}
-		removeTestFiles(frozenPath)
+		_ = headPath
+		_ = frozenPath
 	}()
 
 	seg, err := NewSegmentedIndexFrom(head, frozen)
@@ -62,7 +75,7 @@ func TestSegmentedIndexSearchRemapsFrozenIDs(t *testing.T) {
 		t.Fatalf("publish failed: %v", err)
 	}
 
-	results, err := seg.SearchInto(make([]Node, 0, 1), []float32{11}, 1)
+	results, err := seg.SearchInto(make([]hnsw.Node, 0, 1), []float32{11}, 1)
 	if err != nil {
 		t.Fatalf("SearchInto failed: %v", err)
 	}
@@ -90,8 +103,8 @@ func BenchmarkSegmentedSearchMerge(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	results := make([]Node, 0, benchSearchK)
-	if _, err := seg.SearchInto(results[:0], query, benchSearchK); err != nil {
+	results := make([]hnsw.Node, 0, segBenchSearchK)
+	if _, err := seg.SearchInto(results[:0], query, segBenchSearchK); err != nil {
 		b.Fatal(err)
 	}
 
@@ -101,7 +114,7 @@ func BenchmarkSegmentedSearchMerge(b *testing.B) {
 	b.StartTimer()
 	for b.Loop() {
 		var runErr error
-		results, runErr = seg.SearchInto(results[:0], query, benchSearchK)
+		results, runErr = seg.SearchInto(results[:0], query, segBenchSearchK)
 		if runErr != nil {
 			b.Fatal(runErr)
 		}
@@ -133,11 +146,11 @@ func BenchmarkSegmentedPublish(b *testing.B) {
 	b.StopTimer()
 }
 
-func mustSegmentIndex(tb testing.TB, root, name string, values []float32) (*Index, string) {
+func mustSegmentIndex(tb testing.TB, root, name string, values []float32) (*hnsw.Index, string) {
 	tb.Helper()
 
 	path := fmt.Sprintf("%s/%s.hnsw", root, name)
-	storage, err := NewStorage(path, IndexConfig{
+	storage, err := hnsw.NewStorage(path, hnsw.IndexConfig{
 		Dims:     1,
 		M:        4,
 		MMax0:    8,
@@ -147,7 +160,7 @@ func mustSegmentIndex(tb testing.TB, root, name string, values []float32) (*Inde
 		tb.Fatalf("NewStorage(%s): %v", name, err)
 	}
 
-	idx := NewIndex(storage, L2)
+	idx := hnsw.NewIndex(storage, hnsw.L2)
 	idx.SetEfSearch(16)
 	idx.SetEfConst(16)
 	for _, v := range values {
@@ -158,10 +171,10 @@ func mustSegmentIndex(tb testing.TB, root, name string, values []float32) (*Inde
 	return idx, path
 }
 
-func benchSegmentedIndices(tb testing.TB) (*Index, *Index, []float32) {
+func benchSegmentedIndices(tb testing.TB) (*hnsw.Index, *hnsw.Index, []float32) {
 	tb.Helper()
 
-	vectors := benchVectors(benchNodes, 1, 0x71, 0x72)
+	vectors := benchVectors(segBenchNodes, 1, 0x71, 0x72)
 	half := len(vectors) / 2
 
 	root := tb.TempDir()
@@ -171,26 +184,38 @@ func benchSegmentedIndices(tb testing.TB) (*Index, *Index, []float32) {
 	return head, frozen, query
 }
 
-func benchOpenSegmentIndex(tb testing.TB, path string, vectors [][]float32) *Index {
+func benchOpenSegmentIndex(tb testing.TB, path string, vectors [][]float32) *hnsw.Index {
 	tb.Helper()
 
-	storage, err := NewStorage(path, IndexConfig{
+	storage, err := hnsw.NewStorage(path, hnsw.IndexConfig{
 		Dims:     uint32(len(vectors[0])),
-		M:        benchM,
-		MMax0:    benchMMax0,
-		MaxLevel: benchMaxLevel,
+		M:        segBenchM,
+		MMax0:    segBenchMMax0,
+		MaxLevel: segBenchMaxLevel,
 	}, uint32(len(vectors)))
 	if err != nil {
 		tb.Fatal(err)
 	}
 
-	idx := NewIndex(storage, L2)
-	idx.SetEfSearch(benchEfSearch)
-	idx.SetEfConst(benchEfConst)
+	idx := hnsw.NewIndex(storage, hnsw.L2)
+	idx.SetEfSearch(segBenchEfSearch)
+	idx.SetEfConst(segBenchEfConst)
 	if err := idx.BatchInsert(vectors, nil); err != nil {
 		tb.Fatal(err)
 	}
 	return idx
+}
+
+func benchVectors(n, dims int, seed1, seed2 uint64) [][]float32 {
+	r := rand.New(rand.NewPCG(seed1, seed2))
+	vecs := make([][]float32, n)
+	for i := range vecs {
+		vecs[i] = make([]float32, dims)
+		for j := range vecs[i] {
+			vecs[i][j] = r.Float32()
+		}
+	}
+	return vecs
 }
 
 func exactTopK(vecs [][]float32, query []float32, baseID uint32, k int) []uint32 {
@@ -203,7 +228,7 @@ func exactTopK(vecs [][]float32, query []float32, baseID uint32, k int) []uint32
 	for i, vec := range vecs {
 		scoredIDs = append(scoredIDs, scored{
 			id:   baseID + uint32(i),
-			dist: L2(query, vec),
+			dist: hnsw.L2(query, vec),
 		})
 	}
 
@@ -236,11 +261,11 @@ func TestSegmentedIndexSearchMatchesExactMerge(t *testing.T) {
 		if err := head.Close(); err != nil {
 			t.Fatalf("close head: %v", err)
 		}
-		removeTestFiles(headPath)
 		if err := frozen.Close(); err != nil {
 			t.Fatalf("close frozen: %v", err)
 		}
-		removeTestFiles(frozenPath)
+		_ = headPath
+		_ = frozenPath
 	}()
 
 	seg, err := NewSegmentedIndexFrom(head, frozen)
@@ -249,7 +274,7 @@ func TestSegmentedIndexSearchMatchesExactMerge(t *testing.T) {
 	}
 
 	query := []float32{2.6}
-	got, err := seg.SearchInto(make([]Node, 0, 3), query, 3)
+	got, err := seg.SearchInto(make([]hnsw.Node, 0, 3), query, 3)
 	if err != nil {
 		t.Fatalf("SearchInto failed: %v", err)
 	}
@@ -277,9 +302,9 @@ func TestSegmentedIndexSearchAllowed(t *testing.T) {
 	frozen, frozenPath := mustSegmentIndex(t, t.TempDir(), "frozen", []float32{1, 3, 5})
 	defer func() {
 		head.Close()
-		removeTestFiles(headPath)
 		frozen.Close()
-		removeTestFiles(frozenPath)
+		_ = headPath
+		_ = frozenPath
 	}()
 
 	seg, err := NewSegmentedIndexFrom(head, frozen)
@@ -287,14 +312,10 @@ func TestSegmentedIndexSearchAllowed(t *testing.T) {
 		t.Fatalf("publish failed: %v", err)
 	}
 
-	// global IDs: head (0, 1, 2) values (0, 2, 4)
-	// global IDs: frozen (3, 4, 5) values (1, 3, 5)
-
-	// Allow only global IDs 1 (val 2) and 4 (val 3)
-	allow := NewAllowIDsSorted([]uint32{1, 4})
+	allow := hnsw.NewAllowIDsSorted([]uint32{1, 4})
 
 	query := []float32{2.5}
-	got, err := seg.SearchAllowedInto(make([]Node, 0, 3), query, 3, allow)
+	got, err := seg.SearchAllowedInto(make([]hnsw.Node, 0, 3), query, 3, allow)
 	if err != nil {
 		t.Fatalf("SearchAllowedInto failed: %v", err)
 	}

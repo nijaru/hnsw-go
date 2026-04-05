@@ -5,8 +5,7 @@ import (
 )
 
 func TestMetadata(t *testing.T) {
-	path := "test_meta.hnsw"
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/test_meta.hnsw"
 
 	config := IndexConfig{
 		Dims:     4,
@@ -114,8 +113,7 @@ func TestMetadata(t *testing.T) {
 }
 
 func TestVacuumWithMetadata(t *testing.T) {
-	path := "test_vacuum_meta.hnsw"
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/test_vacuum_meta.hnsw"
 
 	config := IndexConfig{
 		Dims:     4,

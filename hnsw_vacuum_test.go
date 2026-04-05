@@ -6,8 +6,7 @@ import (
 )
 
 func TestVacuum(t *testing.T) {
-	path := "test_vacuum.hnsw"
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/test_vacuum.hnsw"
 
 	config := IndexConfig{
 		Dims:     128,
@@ -103,8 +102,7 @@ func TestVacuum(t *testing.T) {
 }
 
 func TestVacuumClearsFreelist(t *testing.T) {
-	path := "test_vacuum_freelist.hnsw"
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/test_vacuum_freelist.hnsw"
 
 	config := IndexConfig{
 		Dims:     32,

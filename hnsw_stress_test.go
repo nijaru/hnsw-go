@@ -9,8 +9,7 @@ import (
 )
 
 func TestMixedOperationStress(t *testing.T) {
-	path := "test_mixed_ops.hnsw"
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/test_mixed_ops.hnsw"
 
 	config := IndexConfig{
 		Dims:     32,
@@ -33,8 +32,19 @@ func TestMixedOperationStress(t *testing.T) {
 		poolSize    = 1024
 		initialVecs = 128
 		ops         = 240
+		searchOps   = 300
 		searchers   = 4
+
+		shortOps       = 50
+		shortSearchOps = 50
 	)
+
+	opsCount := ops
+	searchOpsCount := searchOps
+	if testing.Short() {
+		opsCount = shortOps
+		searchOpsCount = shortSearchOps
+	}
 
 	vecPool := make([][]float32, poolSize)
 	for i := range vecPool {
@@ -129,7 +139,7 @@ func TestMixedOperationStress(t *testing.T) {
 		go func(seed uint64) {
 			defer wg.Done()
 			rng := rand.New(rand.NewPCG(seed, seed+1))
-			for i := 0; i < 300; i++ {
+			for i := 0; i < searchOpsCount; i++ {
 				select {
 				case <-stopSearch:
 					return
@@ -145,7 +155,7 @@ func TestMixedOperationStress(t *testing.T) {
 		}(uint64(g + 10))
 	}
 
-	for step := 0; step < ops; step++ {
+	for step := 0; step < opsCount; step++ {
 		switch op := writerRNG.Uint32N(100); {
 		case op < 45 && nextVec < poolSize:
 			batchSize := int(writerRNG.Uint32N(3)) + 1

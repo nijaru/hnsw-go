@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
-	"math/rand/v2"
 	"os"
 	"slices"
 	"testing"
@@ -102,8 +101,7 @@ func recallAtK(results []Node, groundTruth []int32, k int) float64 {
 func TestSIFT10kRecall(t *testing.T) {
 	vectors, queries, groundTruth := loadSIFT10kBinary(t)
 
-	path := fmt.Sprintf("sift10k_recall_%d.hnsw", rand.Int64())
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/sift10k_recall.hnsw"
 
 	config := IndexConfig{
 		Dims:     128,
@@ -214,8 +212,7 @@ func TestSIFT10kGroundTruthVerify(t *testing.T) {
 func TestSIFT10kRecallDistribution(t *testing.T) {
 	vectors, queries, groundTruth := loadSIFT10kBinary(t)
 
-	path := fmt.Sprintf("sift10k_dist_%d.hnsw", rand.Int64())
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/sift10k_dist.hnsw"
 
 	config := IndexConfig{
 		Dims:     128,
@@ -272,8 +269,7 @@ func TestSIFT10kRecallDistribution(t *testing.T) {
 func TestSIFT10kSearchVsBruteForce(t *testing.T) {
 	vectors, queries, _ := loadSIFT10kBinary(t)
 
-	path := fmt.Sprintf("sift10k_bf_%d.hnsw", rand.Int64())
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/sift10k_bf.hnsw"
 
 	config := IndexConfig{
 		Dims:     128,
@@ -351,8 +347,7 @@ func TestSIFT10kSearchVsBruteForce(t *testing.T) {
 func TestSIFT10kPersistence(t *testing.T) {
 	vectors, _, _ := loadSIFT10kBinary(t)
 
-	path := fmt.Sprintf("sift10k_persist_%d.hnsw", rand.Int64())
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/sift10k_persist.hnsw"
 
 	config := IndexConfig{
 		Dims:     128,

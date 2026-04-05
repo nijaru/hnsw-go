@@ -1,18 +1,20 @@
-package hnsw
+package segment
 
 import (
 	"fmt"
 	"slices"
 	"sync"
 	"sync/atomic"
+
+	"github.com/omendb/hnsw-go"
 )
 
 type segmentMergeBuffer struct {
 	seen     []uint8
-	best     []Node
-	results  maxNodeHeap
-	out      []Node
-	local    []Node
+	best     []hnsw.Node
+	results  hnsw.NodeMaxHeap
+	out      []hnsw.Node
+	local    []hnsw.Node
 	localIDs []uint32
 	gen      uint8
 }
@@ -30,10 +32,10 @@ func newSegmentMergeBuffer(globalCap, localCap, outCap int) *segmentMergeBuffer 
 
 	return &segmentMergeBuffer{
 		seen:     make([]uint8, globalCap),
-		best:     make([]Node, globalCap),
-		results:  maxNodeHeap{Nodes: make([]Node, 0, outCap)},
-		out:      make([]Node, 0, outCap),
-		local:    make([]Node, 0, localCap),
+		best:     make([]hnsw.Node, globalCap),
+		results:  hnsw.NodeMaxHeap{Nodes: make([]hnsw.Node, 0, outCap)},
+		out:      make([]hnsw.Node, 0, outCap),
+		local:    make([]hnsw.Node, 0, localCap),
 		localIDs: make([]uint32, 0, localCap),
 		gen:      1,
 	}
@@ -49,14 +51,14 @@ func (b *segmentMergeBuffer) reset(globalCap, localCap, outCap int) {
 	}
 	if globalCap > len(b.seen) {
 		b.seen = make([]uint8, globalCap+2048)
-		b.best = make([]Node, len(b.seen))
+		b.best = make([]hnsw.Node, len(b.seen))
 		b.gen = 1
 	}
 	if localCap < 1 {
 		localCap = 1
 	}
 	if cap(b.local) < localCap {
-		b.local = make([]Node, 0, localCap)
+		b.local = make([]hnsw.Node, 0, localCap)
 	} else {
 		b.local = b.local[:0]
 	}
@@ -66,12 +68,12 @@ func (b *segmentMergeBuffer) reset(globalCap, localCap, outCap int) {
 		b.localIDs = b.localIDs[:0]
 	}
 	if cap(b.results.Nodes) < outCap {
-		b.results.Nodes = make([]Node, 0, outCap)
+		b.results.Nodes = make([]hnsw.Node, 0, outCap)
 	} else {
 		b.results.Nodes = b.results.Nodes[:0]
 	}
 	if cap(b.out) < outCap {
-		b.out = make([]Node, 0, outCap)
+		b.out = make([]hnsw.Node, 0, outCap)
 	} else {
 		b.out = b.out[:0]
 	}
@@ -104,7 +106,7 @@ func NewSegmentedIndex() *SegmentedIndex {
 	return idx
 }
 
-func NewSegmentedIndexFrom(head *Index, frozen ...*Index) (*SegmentedIndex, error) {
+func NewSegmentedIndexFrom(head *hnsw.Index, frozen ...*hnsw.Index) (*SegmentedIndex, error) {
 	idx := NewSegmentedIndex()
 	if err := idx.Publish(head, frozen...); err != nil {
 		return nil, err
@@ -112,7 +114,7 @@ func NewSegmentedIndexFrom(head *Index, frozen ...*Index) (*SegmentedIndex, erro
 	return idx, nil
 }
 
-func (idx *SegmentedIndex) Publish(head *Index, frozen ...*Index) error {
+func (idx *SegmentedIndex) Publish(head *hnsw.Index, frozen ...*hnsw.Index) error {
 	headBinding, frozenBindings, err := buildSegmentBindings(head, frozen...)
 	if err != nil {
 		return err
@@ -122,47 +124,59 @@ func (idx *SegmentedIndex) Publish(head *Index, frozen ...*Index) error {
 	return err
 }
 
-func (idx *SegmentedIndex) Search(query []float32, k int) ([]Node, error) {
+func (idx *SegmentedIndex) Search(query []float32, k int) ([]hnsw.Node, error) {
 	return idx.searchInto(nil, query, k, nil, false)
 }
 
-func (idx *SegmentedIndex) SearchInto(dst []Node, query []float32, k int) ([]Node, error) {
+func (idx *SegmentedIndex) SearchInto(
+	dst []hnsw.Node,
+	query []float32,
+	k int,
+) ([]hnsw.Node, error) {
 	return idx.searchInto(dst, query, k, nil, false)
 }
 
-func (idx *SegmentedIndex) SearchAllowed(query []float32, k int, allow AllowList) ([]Node, error) {
+func (idx *SegmentedIndex) SearchAllowed(
+	query []float32,
+	k int,
+	allow hnsw.AllowList,
+) ([]hnsw.Node, error) {
 	return idx.searchInto(nil, query, k, &allow, false)
 }
 
 func (idx *SegmentedIndex) SearchAllowedInto(
-	dst []Node,
+	dst []hnsw.Node,
 	query []float32,
 	k int,
-	allow AllowList,
-) ([]Node, error) {
+	allow hnsw.AllowList,
+) ([]hnsw.Node, error) {
 	return idx.searchInto(dst, query, k, &allow, false)
 }
 
-func (idx *SegmentedIndex) SearchPlanned(query []float32, k int, allow AllowList) ([]Node, error) {
+func (idx *SegmentedIndex) SearchPlanned(
+	query []float32,
+	k int,
+	allow hnsw.AllowList,
+) ([]hnsw.Node, error) {
 	return idx.searchInto(nil, query, k, &allow, true)
 }
 
 func (idx *SegmentedIndex) SearchPlannedInto(
-	dst []Node,
+	dst []hnsw.Node,
 	query []float32,
 	k int,
-	allow AllowList,
-) ([]Node, error) {
+	allow hnsw.AllowList,
+) ([]hnsw.Node, error) {
 	return idx.searchInto(dst, query, k, &allow, true)
 }
 
 func (idx *SegmentedIndex) searchInto(
-	dst []Node,
+	dst []hnsw.Node,
 	query []float32,
 	k int,
-	allow *AllowList,
+	allow *hnsw.AllowList,
 	planned bool,
-) ([]Node, error) {
+) ([]hnsw.Node, error) {
 	if k <= 0 {
 		return nil, nil
 	}
@@ -182,7 +196,7 @@ func (idx *SegmentedIndex) searchInto(
 			continue
 		}
 
-		var local []Node
+		var local []hnsw.Node
 		var err error
 
 		if allow != nil {
@@ -207,7 +221,7 @@ func (idx *SegmentedIndex) searchInto(
 				}
 			}
 
-			localAllow := NewAllowIDsSorted(buf.localIDs)
+			localAllow := hnsw.NewAllowIDsSorted(buf.localIDs)
 			if planned {
 				local, err = seg.index.SearchPlannedInto(buf.local[:0], query, k, localAllow)
 			} else {
@@ -277,8 +291,8 @@ func (idx *SegmentedIndex) releaseMergeBuffer(buf *segmentMergeBuffer) {
 }
 
 func buildSegmentBindings(
-	head *Index,
-	frozen ...*Index,
+	head *hnsw.Index,
+	frozen ...*hnsw.Index,
 ) (*segmentBinding, []*segmentBinding, error) {
 	var headBinding *segmentBinding
 	var headCount uint32

@@ -1,10 +1,14 @@
-package hnsw
+package segment
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/omendb/hnsw-go"
+)
 
 func TestSegmentViewStableIDMapping(t *testing.T) {
-	head := newSegmentBinding(&Index{}, []uint32{0, 1, 2})
-	frozen := newSegmentBinding(&Index{}, []uint32{3, 4})
+	head := newSegmentBinding(&hnsw.Index{}, []uint32{0, 1, 2})
+	frozen := newSegmentBinding(&hnsw.Index{}, []uint32{3, 4})
 
 	catalog := newSegmentCatalog()
 	view, err := catalog.publish(head, frozen)
@@ -30,8 +34,8 @@ func TestSegmentViewStableIDMapping(t *testing.T) {
 }
 
 func TestSegmentViewPublicationIsAtomic(t *testing.T) {
-	head1 := newSegmentBinding(&Index{}, []uint32{0, 1})
-	frozen := newSegmentBinding(&Index{}, []uint32{2})
+	head1 := newSegmentBinding(&hnsw.Index{}, []uint32{0, 1})
+	frozen := newSegmentBinding(&hnsw.Index{}, []uint32{2})
 
 	catalog := newSegmentCatalog()
 	previous, err := catalog.publish(head1, frozen)
@@ -39,7 +43,7 @@ func TestSegmentViewPublicationIsAtomic(t *testing.T) {
 		t.Fatalf("initial publish failed: %v", err)
 	}
 
-	head2 := newSegmentBinding(&Index{}, []uint32{3, 4})
+	head2 := newSegmentBinding(&hnsw.Index{}, []uint32{3, 4})
 	current, err := catalog.publish(head2, frozen)
 	if err != nil {
 		t.Fatalf("second publish failed: %v", err)
@@ -63,8 +67,8 @@ func TestSegmentViewPublicationIsAtomic(t *testing.T) {
 }
 
 func TestSegmentViewRejectsDuplicateGlobalIDs(t *testing.T) {
-	head := newSegmentBinding(&Index{}, []uint32{0, 1})
-	frozen := newSegmentBinding(&Index{}, []uint32{1, 2})
+	head := newSegmentBinding(&hnsw.Index{}, []uint32{0, 1})
+	frozen := newSegmentBinding(&hnsw.Index{}, []uint32{1, 2})
 
 	if _, err := newSegmentView(1, head, frozen); err == nil {
 		t.Fatal("expected duplicate global ids to be rejected")

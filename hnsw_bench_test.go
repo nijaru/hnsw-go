@@ -61,7 +61,6 @@ func BenchmarkHNSWBatchInsert(b *testing.B) {
 		path := filepath.Join(root, fmt.Sprintf("batch_insert_%d.hnsw", i))
 		func() {
 			idx := benchOpenIndex(b, path, len(vectors))
-			defer removeTestFiles(path)
 			defer func() {
 				if err := idx.Close(); err != nil {
 					b.Fatal(err)
@@ -87,7 +86,6 @@ func BenchmarkHNSWDelete(b *testing.B) {
 		path := filepath.Join(root, fmt.Sprintf("delete_%d.hnsw", i))
 		func() {
 			idx := benchOpenIndex(b, path, len(vectors))
-			defer removeTestFiles(path)
 			defer func() {
 				if err := idx.Close(); err != nil {
 					b.Fatal(err)
@@ -117,7 +115,6 @@ func BenchmarkHNSWVacuum(b *testing.B) {
 		path := filepath.Join(root, fmt.Sprintf("vacuum_%d.hnsw", i))
 		func() {
 			idx := benchOpenIndex(b, path, len(vectors))
-			defer removeTestFiles(path)
 			defer func() {
 				if err := idx.Close(); err != nil {
 					b.Fatal(err)

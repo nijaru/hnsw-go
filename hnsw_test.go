@@ -2,23 +2,13 @@ package hnsw
 
 import (
 	"math/rand/v2"
-	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
 )
 
-func removeTestFiles(path string) {
-	os.Remove(path)
-	os.Remove(path + ".vec")
-	os.Remove(path + ".upper")
-	os.Remove(path + ".del")
-	os.Remove(path + ".meta")
-}
-
 func TestBulkDelete(t *testing.T) {
-	path := "test_bulk_delete.hnsw"
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/test_bulk_delete.hnsw"
 
 	config := IndexConfig{
 		Dims:     128,
@@ -92,8 +82,7 @@ func TestBulkDelete(t *testing.T) {
 }
 
 func TestFreelistBookkeeping(t *testing.T) {
-	path := "test_freelist.hnsw"
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/test_freelist.hnsw"
 
 	config := IndexConfig{
 		Dims:     4,
@@ -164,8 +153,7 @@ func TestFreelistBookkeeping(t *testing.T) {
 }
 
 func TestConcurrentBulkDeleteSearch(t *testing.T) {
-	path := "test_concurrent_deletes.hnsw"
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/test_concurrent_deletes.hnsw"
 
 	config := IndexConfig{
 		Dims:     128,
@@ -196,14 +184,27 @@ func TestConcurrentBulkDeleteSearch(t *testing.T) {
 	var wg sync.WaitGroup
 	var searchErrs atomic.Int32
 
-	// 4 goroutines doing bulk deletes
-	for g := 0; g < 4; g++ {
+	deleteRounds := 10
+	deleteBatchSize := 20
+	searchIters := 200
+	deleteGoroutines := 4
+	searchGoroutines := 8
+	if testing.Short() {
+		deleteRounds = 2
+		deleteBatchSize = 10
+		searchIters = 20
+		deleteGoroutines = 2
+		searchGoroutines = 4
+	}
+
+	// goroutines doing bulk deletes
+	for g := 0; g < deleteGoroutines; g++ {
 		wg.Add(1)
 		go func(seed int) {
 			defer wg.Done()
 			rng := rand.New(rand.NewPCG(uint64(seed), 0))
-			for b := 0; b < 10; b++ {
-				ids := make([]uint32, 20)
+			for b := 0; b < deleteRounds; b++ {
+				ids := make([]uint32, deleteBatchSize)
 				for i := range ids {
 					ids[i] = rng.Uint32N(uint32(idx.Len()))
 				}
@@ -212,13 +213,13 @@ func TestConcurrentBulkDeleteSearch(t *testing.T) {
 		}(g)
 	}
 
-	// 8 goroutines searching
-	for g := 0; g < 8; g++ {
+	// goroutines searching
+	for g := 0; g < searchGoroutines; g++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			query := make([]float32, 128)
-			for i := 0; i < 200; i++ {
+			for i := 0; i < searchIters; i++ {
 				for j := range query {
 					query[j] = rand.Float32()
 				}
@@ -239,8 +240,7 @@ func TestConcurrentBulkDeleteSearch(t *testing.T) {
 }
 
 func TestDelete(t *testing.T) {
-	path := "test_delete.hnsw"
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/test_delete.hnsw"
 
 	config := IndexConfig{
 		Dims:     128,
@@ -318,8 +318,7 @@ func TestDelete(t *testing.T) {
 }
 
 func TestHNSW(t *testing.T) {
-	path := "test.hnsw"
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/test.hnsw"
 
 	config := IndexConfig{
 		Dims:     128,
@@ -371,8 +370,7 @@ func TestHNSW(t *testing.T) {
 }
 
 func TestStorageGrow(t *testing.T) {
-	path := "test_grow.hnsw"
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/test_grow.hnsw"
 
 	config := IndexConfig{
 		Dims:     4,
@@ -393,8 +391,7 @@ func TestStorageGrow(t *testing.T) {
 }
 
 func TestGrowTriggered(t *testing.T) {
-	path := "test_grow_trigger.hnsw"
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/test_grow_trigger.hnsw"
 
 	config := IndexConfig{
 		Dims:     4,
@@ -441,8 +438,7 @@ func TestGrowTriggered(t *testing.T) {
 }
 
 func TestSearchEmptyIndex(t *testing.T) {
-	path := "test_empty.hnsw"
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/test_empty.hnsw"
 
 	config := IndexConfig{
 		Dims:     4,
@@ -471,8 +467,7 @@ func TestSearchEmptyIndex(t *testing.T) {
 }
 
 func TestSearchKZero(t *testing.T) {
-	path := "test_k0.hnsw"
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/test_k0.hnsw"
 
 	config := IndexConfig{
 		Dims:     4,
@@ -507,8 +502,7 @@ func TestSearchKZero(t *testing.T) {
 }
 
 func TestSearchKGreaterThanNodeCount(t *testing.T) {
-	path := "test_kbig.hnsw"
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/test_kbig.hnsw"
 
 	config := IndexConfig{
 		Dims:     4,
@@ -545,8 +539,7 @@ func TestSearchKGreaterThanNodeCount(t *testing.T) {
 }
 
 func TestWrongDimensions(t *testing.T) {
-	path := "test_wrongdims.hnsw"
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/test_wrongdims.hnsw"
 
 	config := IndexConfig{
 		Dims:     4,
@@ -577,31 +570,26 @@ func TestWrongDimensions(t *testing.T) {
 }
 
 func TestInvalidConfig(t *testing.T) {
-	path := "test_badconfig.hnsw"
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/test_badconfig.hnsw"
 
 	_, err := NewStorage(path, IndexConfig{Dims: 0, M: 16, MaxLevel: 4}, 10)
 	if err == nil {
 		t.Fatal("expected error for Dims=0")
-		os.Remove(path)
 	}
 
 	_, err = NewStorage(path, IndexConfig{Dims: 4, M: 0, MaxLevel: 4}, 10)
 	if err == nil {
 		t.Fatal("expected error for M=0")
-		os.Remove(path)
 	}
 
 	_, err = NewStorage(path, IndexConfig{Dims: 4, M: 16, MaxLevel: 0}, 10)
 	if err == nil {
 		t.Fatal("expected error for MaxLevel=0")
-		os.Remove(path)
 	}
 }
 
 func TestCosineDistance(t *testing.T) {
-	path := "test_cosine.hnsw"
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/test_cosine.hnsw"
 
 	config := IndexConfig{
 		Dims:     4,
@@ -649,8 +637,7 @@ func TestCosineDistance(t *testing.T) {
 }
 
 func TestDotDistance(t *testing.T) {
-	path := "test_dot.hnsw"
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/test_dot.hnsw"
 
 	config := IndexConfig{
 		Dims:     4,
@@ -698,8 +685,7 @@ func TestDotDistance(t *testing.T) {
 }
 
 func TestConcurrentInsertSearch(t *testing.T) {
-	path := "test_concurrent.hnsw"
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/test_concurrent.hnsw"
 
 	config := IndexConfig{
 		Dims:     128,
@@ -728,19 +714,33 @@ func TestConcurrentInsertSearch(t *testing.T) {
 		}
 	}
 
-	const inserters = 8
-	const searchers = 16
-	const opsPerGoroutine = 500
+	const (
+		inserters         = 8
+		searchers         = 16
+		opsPerGoroutine   = 500
+		shortOpsPerGorout = 50
+		shortSearchers    = 4
+		shortInserters    = 2
+	)
+
+	ops := opsPerGoroutine
+	ns := searchers
+	ni := inserters
+	if testing.Short() {
+		ops = shortOpsPerGorout
+		ns = shortSearchers
+		ni = shortInserters
+	}
 
 	var wg sync.WaitGroup
 	var searchErrs, insertErrs atomic.Int32
 
-	for s := 0; s < searchers; s++ {
+	for s := 0; s < ns; s++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			query := make([]float32, 128)
-			for i := 0; i < opsPerGoroutine; i++ {
+			for i := 0; i < ops; i++ {
 				for j := range query {
 					query[j] = rand.Float32()
 				}
@@ -757,11 +757,11 @@ func TestConcurrentInsertSearch(t *testing.T) {
 		}()
 	}
 
-	for g := 0; g < inserters; g++ {
+	for g := 0; g < ni; g++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for i := 0; i < opsPerGoroutine; i++ {
+			for i := 0; i < ops; i++ {
 				vec := make([]float32, 128)
 				for j := range vec {
 					vec[j] = rand.Float32()
@@ -784,7 +784,7 @@ func TestConcurrentInsertSearch(t *testing.T) {
 	}
 
 	stats := idx.Stats()
-	expected := uint32(100 + inserters*opsPerGoroutine)
+	expected := uint32(100 + ni*ops)
 	if stats.NodeCount != expected {
 		t.Errorf("expected %d nodes, got %d", expected, stats.NodeCount)
 	}
@@ -804,8 +804,7 @@ func TestConcurrentInsertSearch(t *testing.T) {
 }
 
 func TestBatchInsert(t *testing.T) {
-	path := "test_batch.hnsw"
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/test_batch.hnsw"
 
 	config := IndexConfig{
 		Dims:     128,
@@ -850,8 +849,7 @@ func TestBatchInsert(t *testing.T) {
 }
 
 func TestMultiProbe(t *testing.T) {
-	path := "test_multiprobe.hnsw"
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/test_multiprobe.hnsw"
 
 	config := IndexConfig{
 		Dims:     128,
@@ -905,8 +903,7 @@ func TestMultiProbe(t *testing.T) {
 }
 
 func TestPersistence(t *testing.T) {
-	path := "test_persist.hnsw"
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/test_persist.hnsw"
 
 	config := IndexConfig{
 		Dims:     4,

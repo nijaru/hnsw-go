@@ -24,8 +24,7 @@ func TestAllowListContains(t *testing.T) {
 }
 
 func TestSearchAllowedZeroAlloc(t *testing.T) {
-	path := "test_search_allowed.hnsw"
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/test_search_allowed.hnsw"
 
 	config := IndexConfig{
 		Dims:     8,

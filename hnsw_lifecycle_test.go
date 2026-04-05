@@ -3,8 +3,7 @@ package hnsw
 import "testing"
 
 func TestReplaceKeepsID(t *testing.T) {
-	path := "test_replace.hnsw"
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/test_replace.hnsw"
 
 	idx := mustTestIndex(t, path, 4, 4, 8, 4)
 	defer idx.storage.Close()
@@ -41,8 +40,7 @@ func TestReplaceKeepsID(t *testing.T) {
 }
 
 func TestReinsertRestoresID(t *testing.T) {
-	path := "test_reinsert.hnsw"
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/test_reinsert.hnsw"
 
 	idx := mustTestIndex(t, path, 4, 4, 8, 4)
 	defer idx.storage.Close()

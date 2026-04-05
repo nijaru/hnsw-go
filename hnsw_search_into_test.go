@@ -6,8 +6,7 @@ import (
 )
 
 func TestSearchIntoZeroAlloc(t *testing.T) {
-	path := "test_search_into.hnsw"
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/test_search_into.hnsw"
 
 	config := IndexConfig{
 		Dims:     32,

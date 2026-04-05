@@ -1,8 +1,10 @@
-package hnsw
+package filter
 
 import (
 	"reflect"
 	"testing"
+
+	"github.com/omendb/hnsw-go"
 )
 
 func TestTermIndex(t *testing.T) {
@@ -71,7 +73,7 @@ func TestTermIndex(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var got AllowList
+			var got hnsw.AllowList
 			switch tt.method {
 			case "Allow":
 				got = ti.Allow(tt.args[0])

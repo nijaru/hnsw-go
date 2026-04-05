@@ -58,8 +58,7 @@ func TestChooseSearchPlan(t *testing.T) {
 }
 
 func TestSearchPlannedZeroAlloc(t *testing.T) {
-	path := "test_search_planned.hnsw"
-	defer removeTestFiles(path)
+	path := t.TempDir() + "/test_search_planned.hnsw"
 
 	config := IndexConfig{
 		Dims:     8,

@@ -1,4 +1,4 @@
-package hnsw
+package segment
 
 import (
 	"fmt"
@@ -6,6 +6,8 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+
+	"github.com/omendb/hnsw-go"
 )
 
 const invalidGlobalID = math.MaxUint32
@@ -20,18 +22,18 @@ func (loc segmentLocation) valid() bool {
 }
 
 type segmentBinding struct {
-	index         *Index
+	index         *hnsw.Index
 	localToGlobal []uint32
 }
 
-func newSegmentBinding(index *Index, localToGlobal []uint32) *segmentBinding {
+func newSegmentBinding(index *hnsw.Index, localToGlobal []uint32) *segmentBinding {
 	return &segmentBinding{
 		index:         index,
 		localToGlobal: slices.Clone(localToGlobal),
 	}
 }
 
-func newContiguousSegmentBinding(index *Index, baseGlobal, localCount uint32) *segmentBinding {
+func newContiguousSegmentBinding(index *hnsw.Index, baseGlobal, localCount uint32) *segmentBinding {
 	localToGlobal := make([]uint32, localCount)
 	for i := range localToGlobal {
 		localToGlobal[i] = baseGlobal + uint32(i)

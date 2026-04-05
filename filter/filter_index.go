@@ -1,9 +1,11 @@
-package hnsw
+package filter
 
 import (
 	"cmp"
 	"slices"
 	"sync"
+
+	"github.com/omendb/hnsw-go"
 )
 
 // TermIndex is an embedded inverted index mapping string terms (like tenants or tags)
@@ -55,24 +57,24 @@ func (ti *TermIndex) Remove(id uint32, terms ...string) {
 }
 
 // Allow returns an AllowList containing IDs that possess the given term.
-func (ti *TermIndex) Allow(term string) AllowList {
+func (ti *TermIndex) Allow(term string) hnsw.AllowList {
 	ti.mu.RLock()
 	defer ti.mu.RUnlock()
 
 	ids := ti.terms[term]
 	if len(ids) == 0 {
-		return AllowList{}
+		return hnsw.AllowList{}
 	}
 
 	clone := make([]uint32, len(ids))
 	copy(clone, ids)
-	return NewAllowIDsSorted(clone)
+	return hnsw.NewAllowIDsSorted(clone)
 }
 
 // AllowIntersect returns an AllowList of IDs that possess ALL given terms (AND).
-func (ti *TermIndex) AllowIntersect(terms ...string) AllowList {
+func (ti *TermIndex) AllowIntersect(terms ...string) hnsw.AllowList {
 	if len(terms) == 0 {
-		return AllowList{}
+		return hnsw.AllowList{}
 	}
 
 	ti.mu.RLock()
@@ -83,7 +85,7 @@ func (ti *TermIndex) AllowIntersect(terms ...string) AllowList {
 	for _, term := range terms {
 		ids := ti.terms[term]
 		if len(ids) == 0 {
-			return AllowList{} // If any term is empty, the intersection is empty.
+			return hnsw.AllowList{} // If any term is empty, the intersection is empty.
 		}
 		if smallest == nil || len(ids) < len(smallest) {
 			smallest = ids
@@ -109,13 +111,13 @@ func (ti *TermIndex) AllowIntersect(terms ...string) AllowList {
 		}
 	}
 
-	return NewAllowIDsSorted(intersected)
+	return hnsw.NewAllowIDsSorted(intersected)
 }
 
 // AllowUnion returns an AllowList of IDs that possess ANY of the given terms (OR).
-func (ti *TermIndex) AllowUnion(terms ...string) AllowList {
+func (ti *TermIndex) AllowUnion(terms ...string) hnsw.AllowList {
 	if len(terms) == 0 {
-		return AllowList{}
+		return hnsw.AllowList{}
 	}
 
 	ti.mu.RLock()
@@ -131,12 +133,12 @@ func (ti *TermIndex) AllowUnion(terms ...string) AllowList {
 	}
 
 	if len(allLists) == 0 {
-		return AllowList{}
+		return hnsw.AllowList{}
 	}
 	if len(allLists) == 1 {
 		clone := make([]uint32, len(allLists[0]))
 		copy(clone, allLists[0])
-		return NewAllowIDsSorted(clone)
+		return hnsw.NewAllowIDsSorted(clone)
 	}
 
 	union := make([]uint32, 0, totalSize)
@@ -163,7 +165,7 @@ func (ti *TermIndex) AllowUnion(terms ...string) AllowList {
 		}
 	}
 
-	return NewAllowIDsSorted(union)
+	return hnsw.NewAllowIDsSorted(union)
 }
 
 // numericEntry represents a single stored value and its associated node ID.
@@ -220,13 +222,13 @@ func (ri *RangeIndex) Remove(id uint32, field string) {
 }
 
 // AllowRange returns an AllowList of IDs whose values fall in [minVal, maxVal].
-func (ri *RangeIndex) AllowRange(field string, minVal, maxVal float64) AllowList {
+func (ri *RangeIndex) AllowRange(field string, minVal, maxVal float64) hnsw.AllowList {
 	ri.mu.RLock()
 	defer ri.mu.RUnlock()
 
 	entries := ri.fields[field]
 	if len(entries) == 0 {
-		return AllowList{}
+		return hnsw.AllowList{}
 	}
 
 	startIdx, _ := slices.BinarySearchFunc(
@@ -246,10 +248,10 @@ func (ri *RangeIndex) AllowRange(field string, minVal, maxVal float64) AllowList
 	}
 
 	if len(ids) == 0 {
-		return AllowList{}
+		return hnsw.AllowList{}
 	}
 
 	// IDs are sorted by (val, id) natively, but for the AllowList they must be strictly sorted by ID.
 	slices.Sort(ids)
-	return NewAllowIDsSorted(ids)
+	return hnsw.NewAllowIDsSorted(ids)
 }
