@@ -155,7 +155,10 @@ func benchOpenIndex(tb testing.TB, path string, capacity int) *Index {
 		tb.Fatal(err)
 	}
 
-	return NewIndex(storage, L2, benchEfSearch, benchEfConst)
+	idx := NewIndex(storage, L2)
+	idx.SetEfSearch(benchEfSearch)
+	idx.SetEfConst(benchEfConst)
+	return idx
 }
 
 func benchVectors(n, dims int, seed1, seed2 uint64) [][]float32 {

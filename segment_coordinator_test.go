@@ -147,7 +147,9 @@ func mustSegmentIndex(tb testing.TB, root, name string, values []float32) (*Inde
 		tb.Fatalf("NewStorage(%s): %v", name, err)
 	}
 
-	idx := NewIndex(storage, L2, 16, 16)
+	idx := NewIndex(storage, L2)
+	idx.SetEfSearch(16)
+	idx.SetEfConst(16)
 	for _, v := range values {
 		if err := idx.Insert([]float32{v}, nil); err != nil {
 			tb.Fatalf("Insert(%s): %v", name, err)
@@ -182,7 +184,9 @@ func benchOpenSegmentIndex(tb testing.TB, path string, vectors [][]float32) *Ind
 		tb.Fatal(err)
 	}
 
-	idx := NewIndex(storage, L2, benchEfSearch, benchEfConst)
+	idx := NewIndex(storage, L2)
+	idx.SetEfSearch(benchEfSearch)
+	idx.SetEfConst(benchEfConst)
 	if err := idx.BatchInsert(vectors, nil); err != nil {
 		tb.Fatal(err)
 	}

@@ -29,19 +29,13 @@ type Index struct {
 	freelist   []uint32
 }
 
-func NewIndex(storage *Storage, distFunc DistanceFunc, efSearch, efConst int) *Index {
+func NewIndex(storage *Storage, distFunc DistanceFunc) *Index {
 	m := int(storage.config.M)
 	mMax0 := int(storage.config.MMax0)
 	probes := int(storage.config.Probes)
-	if probes <= 0 {
-		probes = 1
-	}
-	if efSearch <= 0 {
-		efSearch = 16
-	}
-	if efConst <= 0 {
-		efConst = 200
-	}
+	efSearch := int(storage.config.EfSearch)
+	efConst := int(storage.config.EfConst)
+
 	idx := &Index{
 		storage:    storage,
 		distFunc:   distFunc,
@@ -80,18 +74,21 @@ func (idx *Index) SetProbes(probes int) {
 		probes = 1
 	}
 	idx.probes = probes
+	idx.storage.writeUint32(40, uint32(probes))
 	idx.mu.Unlock()
 }
 
 func (idx *Index) SetEfSearch(ef int) {
 	idx.mu.Lock()
 	idx.efSearch = ef
+	idx.storage.writeUint32(44, uint32(ef))
 	idx.mu.Unlock()
 }
 
 func (idx *Index) SetEfConst(ef int) {
 	idx.mu.Lock()
 	idx.efConst = ef
+	idx.storage.writeUint32(48, uint32(ef))
 	idx.mu.Unlock()
 }
 
@@ -697,6 +694,13 @@ func (idx *Index) searchExactAllowedInto(
 }
 
 func (idx *Index) Insert(vec []float32, meta []byte) error {
+	if len(vec) != int(idx.storage.config.Dims) {
+		return fmt.Errorf(
+			"hnsw: vector dims %d != index dims %d",
+			len(vec),
+			idx.storage.config.Dims,
+		)
+	}
 	id, err := idx.storage.addNode()
 	if err != nil {
 		return err
@@ -1197,7 +1201,9 @@ func (idx *Index) Vacuum() error {
 	}
 	defer tmpStorage.Close()
 
-	tmpIdx := NewIndex(tmpStorage, idx.distFunc, idx.efSearch, idx.efConst)
+	tmpIdx := NewIndex(tmpStorage, idx.distFunc)
+	tmpIdx.SetEfSearch(idx.efSearch)
+	tmpIdx.SetEfConst(idx.efConst)
 	tmpIdx.SetProbes(idx.probes)
 
 	// 2. Insert all non-deleted vectors in batches

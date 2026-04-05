@@ -96,7 +96,10 @@ func mustTestIndex(t *testing.T, path string, dims, m, mMax0, maxLevel uint32) *
 		t.Fatalf("failed to create storage: %v", err)
 	}
 
-	return NewIndex(storage, L2, 4, 4)
+	idx := NewIndex(storage, L2)
+	idx.SetEfSearch(4)
+	idx.SetEfConst(4)
+	return idx
 }
 
 func TestRebuild(t *testing.T) {
@@ -112,7 +115,9 @@ func TestRebuild(t *testing.T) {
 		t.Fatalf("failed to create storage: %v", err)
 	}
 
-	idx := NewIndex(storage, L2, 4, 4)
+	idx := NewIndex(storage, L2)
+	idx.SetEfSearch(4)
+	idx.SetEfConst(4)
 
 	// Insert vectors
 	for i := 0; i < 5; i++ {
@@ -165,7 +170,9 @@ func TestStorageResize(t *testing.T) {
 		t.Fatalf("failed to create storage: %v", err)
 	}
 
-	idx := NewIndex(storage, L2, 4, 4)
+	idx := NewIndex(storage, L2)
+	idx.SetEfSearch(4)
+	idx.SetEfConst(4)
 
 	// Force grow(), growUpper(), growMeta()
 	for i := 0; i < 5; i++ {

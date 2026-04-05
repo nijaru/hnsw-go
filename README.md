@@ -34,7 +34,9 @@ func main() {
     storage, _ := hnsw.NewStorage("vectors.hnsw", config, 10000)
     defer storage.Close()
 
-    idx := hnsw.NewIndex(storage, hnsw.L2, 200, 200)
+    idx := hnsw.NewIndex(storage, hnsw.L2)
+    idx.SetEfSearch(200)
+    idx.SetEfConst(200)
 
     // Insert with optional metadata
     meta := []byte("{\"text\": \"hello world\"}")
@@ -67,7 +69,7 @@ type IndexConfig struct {
 
 | Method | Description |
 |--------|-------------|
-| `NewIndex(storage, distFunc, efSearch, efConst)` | Create index from storage. efSearch defaults to 16, efConst to 200. |
+| `NewIndex(storage, distFunc)` | Create index from storage. Defaults: `efSearch=16`, `efConst=200`. Use `SetEfSearch` and `SetEfConst` to override. |
 | `Insert(vec, meta)` error | Insert a vector with optional metadata |
 | `BatchInsert(vecs, metas)` error | Insert multiple vectors/metas sequentially to avoid per-node lock contention |
 | `Replace(id, vec, meta)` error | Refresh a vector in place |

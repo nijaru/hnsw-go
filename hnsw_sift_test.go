@@ -118,7 +118,9 @@ func TestSIFT10kRecall(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2, 200, 200)
+	idx := NewIndex(storage, L2)
+	idx.SetEfSearch(200)
+	idx.SetEfConst(200)
 
 	t.Logf("Inserting %d vectors...", len(vectors))
 	for i, vec := range vectors {
@@ -228,7 +230,9 @@ func TestSIFT10kRecallDistribution(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2, 200, 200)
+	idx := NewIndex(storage, L2)
+	idx.SetEfSearch(200)
+	idx.SetEfConst(200)
 	for i, vec := range vectors {
 		if err := idx.Insert(vec, nil); err != nil {
 			t.Fatalf("insert %d: %v", i, err)
@@ -284,7 +288,9 @@ func TestSIFT10kSearchVsBruteForce(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2, 200, 200)
+	idx := NewIndex(storage, L2)
+	idx.SetEfSearch(200)
+	idx.SetEfConst(200)
 	for i, vec := range vectors {
 		if err := idx.Insert(vec, nil); err != nil {
 			t.Fatalf("insert %d: %v", i, err)
@@ -362,7 +368,9 @@ func TestSIFT10kPersistence(t *testing.T) {
 		}
 		defer storage.Close()
 
-		idx := NewIndex(storage, L2, 100, 100)
+		idx := NewIndex(storage, L2)
+		idx.SetEfSearch(100)
+		idx.SetEfConst(100)
 		for i, vec := range vectors {
 			if err := idx.Insert(vec, nil); err != nil {
 				t.Fatalf("insert %d: %v", i, err)
@@ -376,7 +384,9 @@ func TestSIFT10kPersistence(t *testing.T) {
 	}
 	defer storage2.Close()
 
-	idx2 := NewIndex(storage2, L2, 200, 200)
+	idx2 := NewIndex(storage2, L2)
+	idx2.SetEfSearch(200)
+	idx2.SetEfConst(200)
 	stats := idx2.Stats()
 	if stats.NodeCount != uint32(len(vectors)) {
 		t.Errorf("expected %d nodes after reopen, got %d", len(vectors), stats.NodeCount)

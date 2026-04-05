@@ -197,7 +197,9 @@ func newProfileIndex(capacity, efSearch, m, efConst int) (*hnsw.Index, func() er
 		return nil, nil, err
 	}
 
-	idx := hnsw.NewIndex(storage, hnsw.L2, efSearch, efConst)
+	idx := hnsw.NewIndex(storage, hnsw.L2)
+	idx.SetEfSearch(efSearch)
+	idx.SetEfConst(efConst)
 	cleanup := func() error {
 		var cleanupErr error
 		if err := idx.Close(); err != nil {

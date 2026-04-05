@@ -23,7 +23,9 @@ func TestSearchFiltered(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2, 16, 16)
+	idx := NewIndex(storage, L2)
+	idx.SetEfSearch(16)
+	idx.SetEfConst(16)
 
 	vecs := make([][]float32, 6)
 	for i := range vecs {
@@ -100,7 +102,9 @@ func TestCopyMetadata(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2, 4, 4)
+	idx := NewIndex(storage, L2)
+	idx.SetEfSearch(4)
+	idx.SetEfConst(4)
 
 	if err := idx.Insert([]float32{1, 0, 0, 0}, []byte("payload")); err != nil {
 		t.Fatalf("Insert failed: %v", err)

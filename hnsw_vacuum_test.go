@@ -22,7 +22,9 @@ func TestVacuum(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2, 50, 50)
+	idx := NewIndex(storage, L2)
+	idx.SetEfSearch(50)
+	idx.SetEfConst(50)
 
 	// 1. Insert 100 vectors
 	vectors := make([][]float32, 100)
@@ -116,7 +118,9 @@ func TestVacuumClearsFreelist(t *testing.T) {
 		t.Fatalf("failed to create storage: %v", err)
 	}
 
-	idx := NewIndex(storage, L2, 32, 32)
+	idx := NewIndex(storage, L2)
+	idx.SetEfSearch(32)
+	idx.SetEfConst(32)
 	defer idx.Close()
 
 	vecs := make([][]float32, 16)

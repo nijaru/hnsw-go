@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"unsafe"
@@ -12,16 +13,18 @@ import (
 )
 
 const (
-	HeaderSize = 64
+	HeaderSize = 128
 	Magic      = "HNSW"
 )
 
 type IndexConfig struct {
-	Dims     uint32
-	M        uint32
-	MMax0    uint32
-	MaxLevel uint32
-	Probes   uint32
+	Dims     uint32 // Required
+	M        uint32 // Default: 16
+	MMax0    uint32 // Default: 2*M
+	MaxLevel uint32 // Default: 16
+	Probes   uint32 // Default: 1
+	EfSearch uint32 // Default: 64
+	EfConst  uint32 // Default: 200
 }
 
 type NodeLayout struct {
@@ -101,9 +104,18 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 	if config.MaxLevel == 0 {
 		return nil, fmt.Errorf("hnsw: MaxLevel must be > 0")
 	}
-
+	// Apply defaults
 	if config.MMax0 == 0 {
 		config.MMax0 = config.M * 2
+	}
+	if config.Probes == 0 {
+		config.Probes = 1
+	}
+	if config.EfSearch == 0 {
+		config.EfSearch = 64
+	}
+	if config.EfConst == 0 {
+		config.EfConst = 200
 	}
 
 	layout := NewNodeLayout(config)
@@ -124,28 +136,41 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 		metaSize = 4096
 	}
 
-	graphFile, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o666)
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	dir := filepath.Dir(absPath)
+	base := filepath.Base(absPath)
+
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+
+	graphFile, err := root.OpenFile(base, os.O_RDWR|os.O_CREATE, 0o666)
 	if err != nil {
 		return nil, fmt.Errorf("graph file: %w", err)
 	}
 
-	vecPath := path + ".vec"
-	vecFile, err := os.OpenFile(vecPath, os.O_RDWR|os.O_CREATE, 0o666)
+	vecPath := base + ".vec"
+	vecFile, err := root.OpenFile(vecPath, os.O_RDWR|os.O_CREATE, 0o666)
 	if err != nil {
 		graphFile.Close()
 		return nil, fmt.Errorf("vector file: %w", err)
 	}
 
-	upperPath := path + ".upper"
-	upperFile, err := os.OpenFile(upperPath, os.O_RDWR|os.O_CREATE, 0o666)
+	upperPath := base + ".upper"
+	upperFile, err := root.OpenFile(upperPath, os.O_RDWR|os.O_CREATE, 0o666)
 	if err != nil {
 		vecFile.Close()
 		graphFile.Close()
 		return nil, fmt.Errorf("upper file: %w", err)
 	}
 
-	delPath := path + ".del"
-	delFile, err := os.OpenFile(delPath, os.O_RDWR|os.O_CREATE, 0o666)
+	delPath := base + ".del"
+	delFile, err := root.OpenFile(delPath, os.O_RDWR|os.O_CREATE, 0o666)
 	if err != nil {
 		upperFile.Close()
 		vecFile.Close()
@@ -153,8 +178,8 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 		return nil, fmt.Errorf("deleted file: %w", err)
 	}
 
-	metaPath := path + ".meta"
-	metaFile, err := os.OpenFile(metaPath, os.O_RDWR|os.O_CREATE, 0o666)
+	metaPath := base + ".meta"
+	metaFile, err := root.OpenFile(metaPath, os.O_RDWR|os.O_CREATE, 0o666)
 	if err != nil {
 		delFile.Close()
 		upperFile.Close()
@@ -531,15 +556,15 @@ func (s *Storage) SetDeleted(id uint32, deleted bool) {
 	if deleted {
 		if (s.delData[byteIdx] & (1 << bitIdx)) == 0 {
 			s.delData[byteIdx] |= (1 << bitIdx)
-			count := s.readUint32(48)
-			s.writeUint32(48, count+1)
+			count := s.readUint32(52)
+			s.writeUint32(52, count+1)
 		}
 	} else {
 		if (s.delData[byteIdx] & (1 << bitIdx)) != 0 {
 			s.delData[byteIdx] &^= (1 << bitIdx)
-			count := s.readUint32(48)
+			count := s.readUint32(52)
 			if count > 0 {
-				s.writeUint32(48, count-1)
+				s.writeUint32(52, count-1)
 			}
 		}
 	}
@@ -566,20 +591,23 @@ func (s *Storage) growDeleted(newSize uint32) error {
 
 func (s *Storage) writeHeader(initialNodes, initialUpperSize, initialMetaSize uint32) {
 	copy(s.graphData[0:4], Magic)
-	s.writeUint32(4, 5) // Version 5
+	s.writeUint32(4, 6) // Version 6
 	s.writeUint32(8, s.config.Dims)
 	s.writeUint32(12, s.config.M)
 	s.writeUint32(16, s.config.MMax0)
 	s.writeUint32(20, s.config.MaxLevel)
-	s.writeUint32(24, 0)
-	s.writeUint32(28, 0)
+	s.writeUint32(24, 0) // entry point
+	s.writeUint32(28, 0) // node count
 	s.writeUint32(32, initialNodes)
-	s.writeUint32(36, 0)
-	s.writeUint32(40, initialUpperSize)
-	s.writeUint32(44, 4)
-	s.writeUint32(48, 0)
-	s.writeUint32(52, initialMetaSize)
-	s.writeUint32(56, 4)
+	s.writeUint32(36, 0) // current max level (dynamic)
+	s.writeUint32(40, s.config.Probes)
+	s.writeUint32(44, s.config.EfSearch)
+	s.writeUint32(48, s.config.EfConst)
+	s.writeUint32(52, 0) // deleted count
+	s.writeUint32(56, 4) // upper used
+	s.writeUint32(60, initialUpperSize)
+	s.writeUint32(64, 4) // meta used
+	s.writeUint32(68, initialMetaSize)
 }
 
 func (s *Storage) validateHeader() error {
@@ -588,32 +616,17 @@ func (s *Storage) validateHeader() error {
 		return fmt.Errorf("invalid hnsw file: bad magic %q", magic)
 	}
 	ver := s.readUint32(4)
-	if ver < 1 || ver > 5 {
+	if ver < 1 || ver > 6 {
 		return fmt.Errorf("unsupported hnsw version: %d", ver)
 	}
-	if s.readUint32(8) != s.config.Dims {
-		return fmt.Errorf(
-			"dims mismatch: file has %d, config has %d",
-			s.readUint32(8),
-			s.config.Dims,
-		)
-	}
-	if s.readUint32(12) != s.config.M {
-		return fmt.Errorf("M mismatch: file has %d, config has %d", s.readUint32(12), s.config.M)
-	}
-	if s.readUint32(16) != s.config.MMax0 {
-		return fmt.Errorf(
-			"MMax0 mismatch: file has %d, config has %d",
-			s.readUint32(16),
-			s.config.MMax0,
-		)
-	}
-	if s.readUint32(20) != s.config.MaxLevel {
-		return fmt.Errorf(
-			"MaxLevel mismatch: file has %d, config has %d",
-			s.readUint32(20),
-			s.config.MaxLevel,
-		)
+	s.config.Dims = s.readUint32(8)
+	s.config.M = s.readUint32(12)
+	s.config.MMax0 = s.readUint32(16)
+	s.config.MaxLevel = s.readUint32(20)
+	if ver >= 6 {
+		s.config.Probes = s.readUint32(40)
+		s.config.EfSearch = s.readUint32(44)
+		s.config.EfConst = s.readUint32(48)
 	}
 	return nil
 }
@@ -632,7 +645,7 @@ func (s *Storage) writeUint32Upper(offset uint64, val uint32) {
 
 func (s *Storage) GetMaxLevel(id uint32) int {
 	offset := uint64(HeaderSize) + uint64(id)*uint64(s.layout.GraphNodeSize)
-	return int(s.readUint32(offset))
+	return int(binary.LittleEndian.Uint32(s.graphData[offset+4 : offset+8]))
 }
 
 func (s *Storage) getGraphNode(id uint32) []byte {
@@ -673,8 +686,8 @@ func (s *Storage) SetMetadata(id uint32, meta []byte) error {
 	size := uint32(len(meta))
 
 	s.allocMu.Lock()
-	used := s.readUint32(56)
-	allocated := s.readUint32(52)
+	used := s.readUint32(64)
+	allocated := s.readUint32(68)
 
 	if used+size > allocated {
 		newAllocated := max(allocated*2, used+size+4096)
@@ -686,7 +699,7 @@ func (s *Storage) SetMetadata(id uint32, meta []byte) error {
 
 	offset := used
 	copy(s.metaData[offset:offset+size], meta)
-	s.writeUint32(56, used+size)
+	s.writeUint32(64, used+size)
 	s.allocMu.Unlock()
 
 	data := s.getGraphNode(id)
@@ -713,7 +726,7 @@ func (s *Storage) growMeta(newAllocated uint32) error {
 
 	oldMeta := s.metaData
 	s.metaData = metaData
-	s.writeUint32(52, newAllocated)
+	s.writeUint32(68, newAllocated)
 
 	if oldMeta != nil {
 		unix.Munmap(oldMeta)
@@ -767,19 +780,20 @@ func (s *Storage) SetNeighbors(id uint32, layer int, neighbors []uint32) {
 	} else {
 		offset := binary.LittleEndian.Uint32(data[s.layout.UpperOffsetOffset : s.layout.UpperOffsetOffset+4])
 		if offset == 0 {
-			panic("hnsw: setting upper neighbors on node with level 0")
+			level := int(binary.LittleEndian.Uint32(data[s.layout.LevelOffset : s.layout.LevelOffset+4]))
+			panic(fmt.Sprintf("hnsw: setting upper neighbors at layer %d on node %d with level %d but offset 0", layer, id, level))
 		}
 		level := int(binary.LittleEndian.Uint32(data[s.layout.LevelOffset : s.layout.LevelOffset+4]))
 		if layer > level {
-			panic("hnsw: layer > node level")
+			panic(fmt.Sprintf("hnsw: layer %d > node %d level %d", layer, id, level))
 		}
 
-		countsOffset := offset + uint32(layer-1)*4
+		countsOffset := uint64(offset) + uint64(layer-1)*4
 		binary.LittleEndian.PutUint32(s.upperData[countsOffset:countsOffset+4], uint32(len(neighbors)))
 
-		allCountsSize := uint32(level) * 4
-		layerNbOffset := offset + allCountsSize + uint32(layer-1)*s.config.M*4
-		neighborsData = s.upperData[layerNbOffset : layerNbOffset+(s.config.M*4)]
+		allCountsSize := uint64(level) * 4
+		layerNbOffset := uint64(offset) + allCountsSize + uint64(layer-1)*uint64(s.config.M)*4
+		neighborsData = s.upperData[layerNbOffset : layerNbOffset+uint64(s.config.M*4)]
 		copy(unsafe.Slice((*uint32)(unsafe.Pointer(&neighborsData[0])), s.config.M), neighbors)
 	}
 }
@@ -792,8 +806,8 @@ func (s *Storage) allocateUpper(id uint32, level int) error {
 	size := uint32(level) * (1 + s.config.M) * 4
 
 	s.allocMu.Lock()
-	used := s.readUint32(44)
-	allocated := s.readUint32(40)
+	used := s.readUint32(56)
+	allocated := s.readUint32(60)
 
 	if used+size > allocated {
 		newAllocated := max(allocated*2, used+size+4096)
@@ -804,7 +818,7 @@ func (s *Storage) allocateUpper(id uint32, level int) error {
 	}
 
 	offset := used
-	s.writeUint32(44, used+size)
+	s.writeUint32(56, used+size)
 	s.allocMu.Unlock()
 
 	data := s.getGraphNode(id)
@@ -830,7 +844,7 @@ func (s *Storage) growUpper(newAllocated uint32) error {
 
 	oldUpper := s.upperData
 	s.upperData = upperData
-	s.writeUint32(40, newAllocated)
+	s.writeUint32(60, newAllocated)
 
 	if oldUpper != nil {
 		unix.Munmap(oldUpper)
@@ -852,6 +866,9 @@ func (s *Storage) UnlockNode(id uint32) {
 }
 
 func (s *Storage) addNode() (uint32, error) {
+	s.allocMu.Lock()
+	defer s.allocMu.Unlock()
+
 	nodeCount := s.readUint32(28)
 	allocated := s.readUint32(32)
 

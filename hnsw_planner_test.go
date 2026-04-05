@@ -74,7 +74,9 @@ func TestSearchPlannedZeroAlloc(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2, 16, 16)
+	idx := NewIndex(storage, L2)
+	idx.SetEfSearch(16)
+	idx.SetEfConst(16)
 
 	vecs := make([][]float32, 6)
 	for i := range vecs {

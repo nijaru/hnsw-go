@@ -33,7 +33,9 @@ func TestBulkDelete(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2, 50, 50)
+	idx := NewIndex(storage, L2)
+	idx.SetEfSearch(50)
+	idx.SetEfConst(50)
 
 	// Insert 100 vectors
 	vectors := make([][]float32, 100)
@@ -106,7 +108,9 @@ func TestFreelistBookkeeping(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2, 10, 10)
+	idx := NewIndex(storage, L2)
+	idx.SetEfSearch(10)
+	idx.SetEfConst(10)
 
 	// Insert 10 vectors with distinct values
 	vecs := make([][]float32, 10)
@@ -176,7 +180,9 @@ func TestConcurrentBulkDeleteSearch(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2, 50, 50)
+	idx := NewIndex(storage, L2)
+	idx.SetEfSearch(50)
+	idx.SetEfConst(50)
 
 	// Seed 1000 nodes
 	for i := 0; i < 1000; i++ {
@@ -249,7 +255,9 @@ func TestDelete(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2, 50, 50)
+	idx := NewIndex(storage, L2)
+	idx.SetEfSearch(50)
+	idx.SetEfConst(50)
 
 	// Insert 10 vectors
 	vectors := make([][]float32, 10)
@@ -326,7 +334,9 @@ func TestHNSW(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2, 100, 100)
+	idx := NewIndex(storage, L2)
+	idx.SetEfSearch(100)
+	idx.SetEfConst(100)
 
 	vectors := make([][]float32, 100)
 	for i := range vectors {
@@ -399,7 +409,9 @@ func TestGrowTriggered(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2, 10, 10)
+	idx := NewIndex(storage, L2)
+	idx.SetEfSearch(10)
+	idx.SetEfConst(10)
 
 	for i := 0; i < 20; i++ {
 		vec := make([]float32, 4)
@@ -445,7 +457,9 @@ func TestSearchEmptyIndex(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2, 10, 10)
+	idx := NewIndex(storage, L2)
+	idx.SetEfSearch(10)
+	idx.SetEfConst(10)
 
 	results, err := idx.Search(make([]float32, 4), 5)
 	if err != nil {
@@ -473,7 +487,9 @@ func TestSearchKZero(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2, 10, 10)
+	idx := NewIndex(storage, L2)
+	idx.SetEfSearch(10)
+	idx.SetEfConst(10)
 
 	vec := make([]float32, 4)
 	for j := range vec {
@@ -507,7 +523,9 @@ func TestSearchKGreaterThanNodeCount(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2, 10, 10)
+	idx := NewIndex(storage, L2)
+	idx.SetEfSearch(10)
+	idx.SetEfConst(10)
 
 	for i := 0; i < 3; i++ {
 		vec := make([]float32, 4)
@@ -543,7 +561,9 @@ func TestWrongDimensions(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2, 10, 10)
+	idx := NewIndex(storage, L2)
+	idx.SetEfSearch(10)
+	idx.SetEfConst(10)
 
 	err = idx.Insert(make([]float32, 8), nil)
 	if err == nil {
@@ -596,7 +616,9 @@ func TestCosineDistance(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, Cosine, 10, 10)
+	idx := NewIndex(storage, Cosine)
+	idx.SetEfSearch(10)
+	idx.SetEfConst(10)
 
 	vecs := [][]float32{
 		{1, 0, 0, 0},
@@ -643,7 +665,9 @@ func TestDotDistance(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, Dot, 10, 10)
+	idx := NewIndex(storage, Dot)
+	idx.SetEfSearch(10)
+	idx.SetEfConst(10)
 
 	vecs := [][]float32{
 		{1, 0, 0, 0},
@@ -690,7 +714,9 @@ func TestConcurrentInsertSearch(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2, 50, 50)
+	idx := NewIndex(storage, L2)
+	idx.SetEfSearch(50)
+	idx.SetEfConst(50)
 
 	for i := 0; i < 100; i++ {
 		vec := make([]float32, 128)
@@ -794,7 +820,9 @@ func TestBatchInsert(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2, 50, 50)
+	idx := NewIndex(storage, L2)
+	idx.SetEfSearch(50)
+	idx.SetEfConst(50)
 
 	vectors := make([][]float32, 100)
 	for i := range vectors {
@@ -838,7 +866,9 @@ func TestMultiProbe(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2, 50, 50)
+	idx := NewIndex(storage, L2)
+	idx.SetEfSearch(50)
+	idx.SetEfConst(50)
 
 	// Insert random vectors
 	for i := 0; i < 500; i++ {
@@ -900,7 +930,10 @@ func TestPersistence(t *testing.T) {
 		}
 		defer storage.Close()
 
-		idx := NewIndex(storage, L2, 20, 20)
+		idx := NewIndex(storage, L2)
+		idx.SetEfSearch(20)
+		idx.SetEfConst(20)
+
 		for _, v := range vecs {
 			if err := idx.Insert(v, nil); err != nil {
 				t.Fatalf("insert: %v", err)
@@ -914,7 +947,10 @@ func TestPersistence(t *testing.T) {
 	}
 	defer storage2.Close()
 
-	idx2 := NewIndex(storage2, L2, 20, 20)
+	idx2 := NewIndex(storage2, L2)
+	idx2.SetEfSearch(20)
+	idx2.SetEfConst(20)
+
 	stats := idx2.Stats()
 	if stats.NodeCount != 50 {
 		t.Errorf("expected 50 nodes after reopen, got %d", stats.NodeCount)

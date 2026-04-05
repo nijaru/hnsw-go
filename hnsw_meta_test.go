@@ -20,7 +20,9 @@ func TestMetadata(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2, 10, 10)
+	idx := NewIndex(storage, L2)
+	idx.SetEfSearch(10)
+	idx.SetEfConst(10)
 
 	// 1. Insert with metadata
 	vec1 := []float32{1, 0, 0, 0}
@@ -95,7 +97,9 @@ func TestMetadata(t *testing.T) {
 	}
 	defer storage2.Close()
 
-	idx2 := NewIndex(storage2, L2, 10, 10)
+	idx2 := NewIndex(storage2, L2)
+	idx2.SetEfSearch(10)
+	idx2.SetEfConst(10)
 	results, err = idx2.Search(vec2, 1)
 	if err != nil {
 		t.Fatalf("search after reopen: %v", err)
@@ -125,7 +129,9 @@ func TestVacuumWithMetadata(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2, 10, 10)
+	idx := NewIndex(storage, L2)
+	idx.SetEfSearch(10)
+	idx.SetEfConst(10)
 
 	// Insert 3 nodes, delete one
 	idx.Insert([]float32{1, 0, 0, 0}, []byte("meta 0"))
