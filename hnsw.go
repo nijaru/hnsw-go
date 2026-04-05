@@ -93,10 +93,7 @@ func (idx *Index) SetEfConst(ef int) {
 }
 
 func (idx *Index) Len() int {
-	idx.mu.RLock()
-	n := idx.nodeCount
-	idx.mu.RUnlock()
-	return int(n)
+	return int(atomic.LoadUint32(&idx.nodeCount))
 }
 
 type Stats struct {
@@ -114,7 +111,7 @@ func (idx *Index) Stats() Stats {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 	return Stats{
-		NodeCount:  idx.nodeCount,
+		NodeCount:  atomic.LoadUint32(&idx.nodeCount),
 		MaxLevel:   idx.maxLevel,
 		EntryPoint: idx.entryPoint,
 		M:          idx.m,
@@ -193,7 +190,7 @@ func (idx *Index) searchPlannedInto(
 	allow AllowList,
 	buf *searchBuffer,
 ) ([]Node, error) {
-	plan := chooseSearchPlan(allow.Len(), k, idx.nodeCount, idx.efSearch)
+	plan := chooseSearchPlan(allow.Len(), k, atomic.LoadUint32(&idx.nodeCount), idx.efSearch)
 	switch plan {
 	case searchPlanExact:
 		return idx.searchExactAllowedInto(dst, query, k, allow, buf)
@@ -302,13 +299,13 @@ func (idx *Index) searchIntoWithFilters(
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
-	if idx.nodeCount == 0 {
+	if atomic.LoadUint32(&idx.nodeCount) == 0 {
 		return nil, nil
 	}
 
 	currMaxLevel := idx.maxLevel
 	currEntryPoint := idx.entryPoint
-	nodeCount := idx.nodeCount
+	nodeCount := atomic.LoadUint32(&idx.nodeCount)
 	efSearch := idx.efSearch
 	probes := idx.probes
 
@@ -464,13 +461,13 @@ func (idx *Index) searchIntoNoFilter(
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
-	if idx.nodeCount == 0 {
+	if atomic.LoadUint32(&idx.nodeCount) == 0 {
 		return nil, nil
 	}
 
 	currMaxLevel := idx.maxLevel
 	currEntryPoint := idx.entryPoint
-	nodeCount := idx.nodeCount
+	nodeCount := atomic.LoadUint32(&idx.nodeCount)
 	efSearch := idx.efSearch
 	probes := idx.probes
 
@@ -483,7 +480,6 @@ func (idx *Index) searchIntoNoFilter(
 		changed := true
 		for changed {
 			changed = false
-			// Greedy move from the best probe
 			best := probeNodes[0]
 			neighbors := idx.storage.GetNeighbors(best.ID, level)
 			for _, nb := range neighbors {
@@ -670,7 +666,7 @@ func (idx *Index) searchExactAllowedInto(
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
-	buf.reset(idx.nodeCount)
+	buf.reset(atomic.LoadUint32(&idx.nodeCount))
 	results := &buf.results
 	allow.ForEach(func(id uint32) bool {
 		if !idx.storage.IsDeleted(id) {
@@ -751,8 +747,8 @@ func (idx *Index) BatchInsert(vecs [][]float32, metas [][]byte) error {
 		allocated = newAllocated
 	}
 
-	idx.nodeCount += numVecs
-	idx.storage.writeUint32(28, idx.nodeCount)
+	atomic.AddUint32(&idx.nodeCount, numVecs)
+	idx.storage.writeUint32(28, atomic.LoadUint32(&idx.nodeCount))
 	idx.mu.Unlock()
 
 	// 2. Perform inserts sequentially so graph mutation stays race-free.
@@ -803,7 +799,7 @@ func (idx *Index) insert(id uint32, vec []float32, meta []byte) error {
 	currEntryPoint := idx.entryPoint
 	currMaxLevel := idx.maxLevel
 	efConst := idx.efConst
-	nodeCount := idx.nodeCount
+	nodeCount := atomic.LoadUint32(&idx.nodeCount)
 
 	currNode := currEntryPoint
 	currDist := idx.dist(vec, idx.storage.GetVector(currNode))
@@ -1194,7 +1190,8 @@ func (idx *Index) Vacuum() error {
 
 	// 1. Create temporary storage
 	// We allocate space for the CURRENT nodeCount minus deletedCount
-	newNodeCount := idx.nodeCount - deletedCount
+	nodeCount := atomic.LoadUint32(&idx.nodeCount)
+	newNodeCount := nodeCount - deletedCount
 	tmpStorage, err := NewStorage(tmpPath, idx.storage.config, newNodeCount)
 	if err != nil {
 		return fmt.Errorf("vacuum: failed to create tmp storage: %w", err)
@@ -1210,7 +1207,7 @@ func (idx *Index) Vacuum() error {
 	batchSize := 1024
 	batch := make([][]float32, 0, batchSize)
 	metas := make([][]byte, 0, batchSize)
-	for i := uint32(0); i < idx.nodeCount; i++ {
+	for i := uint32(0); i < nodeCount; i++ {
 		if !idx.storage.IsDeleted(i) {
 			// We MUST copy the vector because tmpIdx.BatchInsert might use it
 			// after we've moved on to the next one, though BatchInsert currently
