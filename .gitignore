@@ -37,3 +37,4 @@ sift*_test.bin
 handoff.md
 
 *.upper
+/bench
