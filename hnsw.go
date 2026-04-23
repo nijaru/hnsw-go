@@ -27,6 +27,8 @@ type Index struct {
 	pool       sync.Pool
 	scratch    searchBufferSlot
 	freelist   []uint32
+	rngMu      sync.Mutex
+	rng        *rand.Rand
 }
 
 func NewIndex(storage *Storage, distFunc DistanceFunc) *Index {
@@ -47,6 +49,7 @@ func NewIndex(storage *Storage, distFunc DistanceFunc) *Index {
 		probes:     probes,
 		maxLevel:   -1,
 		entryPoint: 0,
+		rng:        rand.New(rand.NewPCG(1, 2)),
 	}
 
 	idx.pool.New = func() any {
@@ -873,9 +876,20 @@ func (idx *Index) insert(id uint32, vec []float32, meta []byte) error {
 	return nil
 }
 
+// SetSeed configures the random number generator used for node levels.
+// Must be called before inserting data to ensure determinism.
+func (idx *Index) SetSeed(seed uint64) {
+	idx.rngMu.Lock()
+	defer idx.rngMu.Unlock()
+	idx.rng = rand.New(rand.NewPCG(seed, seed+1))
+}
+
 func (idx *Index) randomLevel() int {
 	mL := 1.0 / math.Log(float64(idx.m))
-	level := int(-math.Log(1.0-rand.Float64()) * mL)
+	idx.rngMu.Lock()
+	f := idx.rng.Float64()
+	idx.rngMu.Unlock()
+	level := int(-math.Log(1.0-f) * mL)
 	if level < 0 {
 		level = 0
 	}
