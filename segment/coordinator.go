@@ -95,9 +95,9 @@ type SegmentedIndex struct {
 	scratch segmentMergeBufferSlot
 }
 
-func NewSegmentedIndex() *SegmentedIndex {
+func NewSegmentedIndex(dir string) *SegmentedIndex {
 	idx := &SegmentedIndex{
-		catalog: newSegmentCatalog(),
+		catalog: newSegmentCatalog(dir),
 	}
 	idx.pool.New = func() any {
 		return newSegmentMergeBuffer(1, 1, 1)
@@ -106,8 +106,12 @@ func NewSegmentedIndex() *SegmentedIndex {
 	return idx
 }
 
-func NewSegmentedIndexFrom(head *hnsw.Index, frozen ...*hnsw.Index) (*SegmentedIndex, error) {
-	idx := NewSegmentedIndex()
+func NewSegmentedIndexFrom(
+	dir string,
+	head *hnsw.Index,
+	frozen ...*hnsw.Index,
+) (*SegmentedIndex, error) {
+	idx := NewSegmentedIndex(dir)
 	if err := idx.Publish(head, frozen...); err != nil {
 		return nil, err
 	}

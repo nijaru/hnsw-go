@@ -10,7 +10,7 @@ func TestSegmentViewStableIDMapping(t *testing.T) {
 	head := newSegmentBinding(&hnsw.Index{}, []uint32{0, 1, 2})
 	frozen := newSegmentBinding(&hnsw.Index{}, []uint32{3, 4})
 
-	catalog := newSegmentCatalog()
+	catalog := newSegmentCatalog("")
 	view, err := catalog.publish(head, frozen)
 	if err != nil {
 		t.Fatalf("publish failed: %v", err)
@@ -37,7 +37,7 @@ func TestSegmentViewPublicationIsAtomic(t *testing.T) {
 	head1 := newSegmentBinding(&hnsw.Index{}, []uint32{0, 1})
 	frozen := newSegmentBinding(&hnsw.Index{}, []uint32{2})
 
-	catalog := newSegmentCatalog()
+	catalog := newSegmentCatalog("")
 	previous, err := catalog.publish(head1, frozen)
 	if err != nil {
 		t.Fatalf("initial publish failed: %v", err)

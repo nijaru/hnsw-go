@@ -34,7 +34,7 @@ func TestSegmentedIndexSearchMergesTopK(t *testing.T) {
 		_ = frozenPath
 	}()
 
-	seg, err := NewSegmentedIndexFrom(head, frozen)
+	seg, err := NewSegmentedIndexFrom("", head, frozen)
 	if err != nil {
 		t.Fatalf("publish failed: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestSegmentedIndexSearchRemapsFrozenIDs(t *testing.T) {
 		_ = frozenPath
 	}()
 
-	seg, err := NewSegmentedIndexFrom(head, frozen)
+	seg, err := NewSegmentedIndexFrom("", head, frozen)
 	if err != nil {
 		t.Fatalf("publish failed: %v", err)
 	}
@@ -98,7 +98,7 @@ func BenchmarkSegmentedSearchMerge(b *testing.B) {
 		}
 	}()
 
-	seg, err := NewSegmentedIndexFrom(head, frozen)
+	seg, err := NewSegmentedIndexFrom("", head, frozen)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func BenchmarkSegmentedPublish(b *testing.B) {
 		}
 	}()
 
-	seg := NewSegmentedIndex()
+	seg := NewSegmentedIndex("")
 	oldGC := debug.SetGCPercent(-1)
 	defer debug.SetGCPercent(oldGC)
 
@@ -268,7 +268,7 @@ func TestSegmentedIndexSearchMatchesExactMerge(t *testing.T) {
 		_ = frozenPath
 	}()
 
-	seg, err := NewSegmentedIndexFrom(head, frozen)
+	seg, err := NewSegmentedIndexFrom("", head, frozen)
 	if err != nil {
 		t.Fatalf("publish failed: %v", err)
 	}
@@ -291,7 +291,7 @@ func TestSegmentedIndexSearchMatchesExactMerge(t *testing.T) {
 }
 
 func TestSegmentedIndexPublishRejectsEmpty(t *testing.T) {
-	seg := NewSegmentedIndex()
+	seg := NewSegmentedIndex("")
 	if err := seg.Publish(nil); err == nil {
 		t.Fatal("expected empty publish to fail")
 	}
@@ -307,7 +307,7 @@ func TestSegmentedIndexSearchAllowed(t *testing.T) {
 		_ = frozenPath
 	}()
 
-	seg, err := NewSegmentedIndexFrom(head, frozen)
+	seg, err := NewSegmentedIndexFrom("", head, frozen)
 	if err != nil {
 		t.Fatalf("publish failed: %v", err)
 	}
@@ -337,4 +337,42 @@ func TestSegmentedIndexSearchAllowed(t *testing.T) {
 	if !has1 || !has4 {
 		t.Errorf("expected IDs 1 and 4, got %v", got)
 	}
+}
+
+func TestSegmentManifest(t *testing.T) {
+	dir := t.TempDir()
+
+	headPath := dir + "/head.hnsw"
+	headStorage, _ := hnsw.NewStorage(headPath, hnsw.IndexConfig{Dims: 4, M: 4, MaxLevel: 4}, 10)
+	head := hnsw.NewIndex(headStorage, hnsw.L2)
+
+	frozenPath := dir + "/frozen.hnsw"
+	frozenStorage, _ := hnsw.NewStorage(
+		frozenPath,
+		hnsw.IndexConfig{Dims: 4, M: 4, MaxLevel: 4},
+		10,
+	)
+	frozen := hnsw.NewIndex(frozenStorage, hnsw.L2)
+
+	seg, err := NewSegmentedIndexFrom(dir, head, frozen)
+	if err != nil {
+		t.Fatalf("publish failed: %v", err)
+	}
+
+	m, err := ReadManifest(dir)
+	if err != nil {
+		t.Fatalf("failed to read manifest: %v", err)
+	}
+
+	if m.Version != 1 {
+		t.Errorf("expected version 1, got %v", m.Version)
+	}
+	if m.Head != headPath {
+		t.Errorf("expected head path %v, got %v", headPath, m.Head)
+	}
+	if len(m.Frozen) != 1 || m.Frozen[0] != frozenPath {
+		t.Errorf("expected frozen paths %v, got %v", []string{frozenPath}, m.Frozen)
+	}
+
+	_ = seg
 }

@@ -98,7 +98,7 @@ For larger embedded workloads, `SegmentedIndex` provides an immutable view over 
 
 | Method | Description |
 |--------|-------------|
-| `NewSegmentedIndexFrom(head, frozen...)` | Create a coordinator mapping global IDs |
+| `NewSegmentedIndexFrom(dir, head, frozen...)` | Create a coordinator mapping global IDs |
 | `Publish(head, frozen...)` error | Atomically publish a new layout of segments |
 | `SearchInto(dst, query, k)` ([]Node, error) | Zero-alloc merged top-k search across segments |
 

@@ -94,6 +94,11 @@ type Storage struct {
 	allocMu     sync.Mutex
 }
 
+// Path returns the directory path of the storage.
+func (s *Storage) Path() string {
+	return s.path
+}
+
 func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage, error) {
 	if config.Dims == 0 {
 		return nil, fmt.Errorf("hnsw: Dims must be > 0")

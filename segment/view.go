@@ -1,8 +1,11 @@
 package segment
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -184,11 +187,18 @@ func (v *segmentView) globalID(segment int, local uint32) (uint32, bool) {
 type segmentCatalog struct {
 	mu      sync.Mutex
 	version uint64
+	dir     string
 	current atomic.Pointer[segmentView]
 }
 
-func newSegmentCatalog() *segmentCatalog {
-	return &segmentCatalog{}
+func newSegmentCatalog(dir string) *segmentCatalog {
+	return &segmentCatalog{dir: dir}
+}
+
+type Manifest struct {
+	Version uint64   `json:"version"`
+	Head    string   `json:"head,omitempty"`
+	Frozen  []string `json:"frozen,omitempty"`
 }
 
 func (c *segmentCatalog) load() *segmentView {
@@ -208,6 +218,50 @@ func (c *segmentCatalog) publish(
 		return nil, err
 	}
 
+	if c.dir != "" {
+		if err := c.writeManifest(head, frozen); err != nil {
+			return nil, err
+		}
+	}
+
 	c.current.Store(view)
 	return view, nil
+}
+
+func (c *segmentCatalog) writeManifest(head *segmentBinding, frozen []*segmentBinding) error {
+	m := Manifest{
+		Version: c.version,
+	}
+	if head != nil {
+		m.Head = head.index.Path()
+	}
+	for _, f := range frozen {
+		if f != nil {
+			m.Frozen = append(m.Frozen, f.index.Path())
+		}
+	}
+
+	b, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	manifestPath := filepath.Join(c.dir, "manifest.json")
+	tmpPath := manifestPath + ".tmp"
+	if err := os.WriteFile(tmpPath, b, 0o644); err != nil {
+		return err
+	}
+
+	return os.Rename(tmpPath, manifestPath)
+}
+
+// ReadManifest reads a segment manifest from the specified directory.
+func ReadManifest(dir string) (Manifest, error) {
+	var m Manifest
+	b, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
+	if err != nil {
+		return m, err
+	}
+	err = json.Unmarshal(b, &m)
+	return m, err
 }

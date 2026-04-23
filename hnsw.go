@@ -31,6 +31,11 @@ type Index struct {
 	rng        *rand.Rand
 }
 
+// Path returns the directory path of the underlying storage.
+func (idx *Index) Path() string {
+	return idx.storage.Path()
+}
+
 func NewIndex(storage *Storage, distFunc DistanceFunc) *Index {
 	m := int(storage.config.M)
 	mMax0 := int(storage.config.MMax0)
