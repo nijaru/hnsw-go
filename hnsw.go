@@ -9,7 +9,6 @@ import (
 	"math"
 	"math/rand/v2"
 	"os"
-	"reflect"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -18,7 +17,7 @@ import (
 type Index struct {
 	storage    *Storage
 	distFunc   DistanceFunc
-	isL2       bool
+	distType   DistanceType
 	mu         sync.RWMutex
 	entryPoint uint32
 	maxLevel   int
@@ -42,7 +41,13 @@ func (idx *Index) Path() string {
 	return idx.storage.Path()
 }
 
-func NewIndex(storage *Storage, distFunc DistanceFunc) *Index {
+func NewIndex(storage *Storage) *Index {
+	distType := storage.config.Distance
+	if distType == 0 {
+		distType = DistanceL2 // zero-value default
+	}
+	distFunc := distType.DistFunc()
+
 	m := int(storage.config.M)
 	mMax0 := int(storage.config.MMax0)
 	probes := int(storage.config.Probes)
@@ -52,7 +57,7 @@ func NewIndex(storage *Storage, distFunc DistanceFunc) *Index {
 	idx := &Index{
 		storage:    storage,
 		distFunc:   distFunc,
-		isL2:       reflect.ValueOf(distFunc).Pointer() == reflect.ValueOf(L2).Pointer(),
+		distType:   distType,
 		m:          m,
 		mMax0:      mMax0,
 		efSearch:   efSearch,
@@ -76,9 +81,6 @@ func NewIndex(storage *Storage, distFunc DistanceFunc) *Index {
 }
 
 func (idx *Index) dist(a, b []float32) float32 {
-	if idx.isL2 {
-		return L2(a, b)
-	}
 	return idx.distFunc(a, b)
 }
 
@@ -538,7 +540,7 @@ func (idx *Index) searchIntoNoFilter(
 			continue
 		}
 
-		if idx.isL2 {
+		if idx.distType == DistanceL2 {
 			i := 0
 			for ; i <= count-2; i += 2 {
 				nb1 := filtered[i]
@@ -1191,7 +1193,7 @@ func (idx *Index) Vacuum() error {
 	}
 	defer tmpStorage.Close()
 
-	tmpIdx := NewIndex(tmpStorage, idx.distFunc)
+	tmpIdx := NewIndex(tmpStorage)
 	tmpIdx.SetEfSearch(idx.efSearch)
 	tmpIdx.SetEfConst(idx.efConst)
 	tmpIdx.SetProbes(idx.probes)

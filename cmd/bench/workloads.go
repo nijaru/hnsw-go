@@ -177,6 +177,7 @@ func profileIndexConfig(m int) hnsw.IndexConfig {
 		M:        uint32(m),
 		MMax0:    uint32(m * 2),
 		MaxLevel: profileMaxLevel,
+		Distance: hnsw.DistanceL2,
 	}
 }
 
@@ -197,7 +198,7 @@ func newProfileIndex(capacity, efSearch, m, efConst int) (*hnsw.Index, func() er
 		return nil, nil, err
 	}
 
-	idx := hnsw.NewIndex(storage, hnsw.L2)
+	idx := hnsw.NewIndex(storage)
 	idx.SetEfSearch(efSearch)
 	idx.SetEfConst(efConst)
 	cleanup := func() error {

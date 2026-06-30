@@ -19,7 +19,7 @@ func TestMetadata(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2)
+	idx := NewIndex(storage)
 	idx.SetEfSearch(10)
 	idx.SetEfConst(10)
 
@@ -96,7 +96,7 @@ func TestMetadata(t *testing.T) {
 	}
 	defer storage2.Close()
 
-	idx2 := NewIndex(storage2, L2)
+	idx2 := NewIndex(storage2)
 	idx2.SetEfSearch(10)
 	idx2.SetEfConst(10)
 	results, err = idx2.Search(vec2, 1)
@@ -127,7 +127,7 @@ func TestVacuumWithMetadata(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2)
+	idx := NewIndex(storage)
 	idx.SetEfSearch(10)
 	idx.SetEfConst(10)
 

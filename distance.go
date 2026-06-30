@@ -4,6 +4,28 @@ import (
 	"math"
 )
 
+// DistanceType selects the distance metric used by the index.
+// Set in IndexConfig.Distance before calling NewIndex.
+type DistanceType uint8
+
+const (
+	DistanceL2     DistanceType = iota // Euclidean distance (default if zero)
+	DistanceCosine                     // 1 − cosine similarity
+	DistanceDot                        // Negative dot product (max inner product)
+)
+
+// DistFunc returns the DistanceFunc for this type.
+func (d DistanceType) DistFunc() DistanceFunc {
+	switch d {
+	case DistanceCosine:
+		return Cosine
+	case DistanceDot:
+		return Dot
+	default:
+		return L2
+	}
+}
+
 type DistanceFunc func(a, b []float32) float32
 
 func L2(a, b []float32) float32 {

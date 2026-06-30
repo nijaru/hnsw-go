@@ -22,7 +22,7 @@ func TestSearchFiltered(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2)
+	idx := NewIndex(storage)
 	idx.SetEfSearch(16)
 	idx.SetEfConst(16)
 
@@ -100,7 +100,7 @@ func TestCopyMetadata(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2)
+	idx := NewIndex(storage)
 	idx.SetEfSearch(4)
 	idx.SetEfConst(4)
 

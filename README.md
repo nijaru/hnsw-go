@@ -29,12 +29,13 @@ func main() {
         M:        16,
         MMax0:    32,      // defaults to 2*M if zero
         MaxLevel: 16,
+        Distance: hnsw.DistanceL2,
     }
 
     storage, _ := hnsw.NewStorage("vectors.hnsw", config, 10000)
     defer storage.Close()
 
-    idx := hnsw.NewIndex(storage, hnsw.L2)
+    idx := hnsw.NewIndex(storage)
     idx.SetEfSearch(200)
     idx.SetEfConst(200)
 
@@ -58,10 +59,11 @@ func main() {
 
 ```go
 type IndexConfig struct {
-    Dims     uint32  // Vector dimensions (required)
-    M        uint32  // Max neighbors per layer (required)
-    MMax0    uint32  // Max neighbors at layer 0 (default: 2*M)
-    MaxLevel uint32  // Max graph levels (required)
+    Dims     uint32       // Vector dimensions (required)
+    M        uint32       // Max neighbors per layer (required)
+    MMax0    uint32       // Max neighbors at layer 0 (default: 2*M)
+    MaxLevel uint32       // Max graph levels (required)
+    Distance DistanceType // L2 (default), Cosine, or Dot (runtime-only)
 }
 ```
 
@@ -69,7 +71,7 @@ type IndexConfig struct {
 
 | Method | Description |
 |--------|-------------|
-| `NewIndex(storage, distFunc)` | Create index from storage. Defaults: `efSearch=16`, `efConst=200`. Use `SetEfSearch` and `SetEfConst` to override. |
+| `NewIndex(storage)` | Create index from storage. Defaults: `efSearch=16`, `efConst=200`. Use `SetEfSearch` and `SetEfConst` to override. |
 | `Insert(vec, meta)` error | Insert a vector with optional metadata |
 | `BatchInsert(vecs, metas)` error | Insert multiple vectors/metas sequentially to avoid per-node lock contention |
 | `Replace(id, vec, meta)` error | Refresh a vector in place |

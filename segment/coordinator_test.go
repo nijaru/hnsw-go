@@ -160,7 +160,7 @@ func mustSegmentIndex(tb testing.TB, root, name string, values []float32) (*hnsw
 		tb.Fatalf("NewStorage(%s): %v", name, err)
 	}
 
-	idx := hnsw.NewIndex(storage, hnsw.L2)
+	idx := hnsw.NewIndex(storage)
 	idx.SetEfSearch(16)
 	idx.SetEfConst(16)
 	for _, v := range values {
@@ -197,7 +197,7 @@ func benchOpenSegmentIndex(tb testing.TB, path string, vectors [][]float32) *hns
 		tb.Fatal(err)
 	}
 
-	idx := hnsw.NewIndex(storage, hnsw.L2)
+	idx := hnsw.NewIndex(storage)
 	idx.SetEfSearch(segBenchEfSearch)
 	idx.SetEfConst(segBenchEfConst)
 	if err := idx.BatchInsert(vectors, nil); err != nil {
@@ -344,7 +344,7 @@ func TestSegmentManifest(t *testing.T) {
 
 	headPath := dir + "/head.hnsw"
 	headStorage, _ := hnsw.NewStorage(headPath, hnsw.IndexConfig{Dims: 4, M: 4, MaxLevel: 4}, 10)
-	head := hnsw.NewIndex(headStorage, hnsw.L2)
+	head := hnsw.NewIndex(headStorage)
 
 	frozenPath := dir + "/frozen.hnsw"
 	frozenStorage, _ := hnsw.NewStorage(
@@ -352,7 +352,7 @@ func TestSegmentManifest(t *testing.T) {
 		hnsw.IndexConfig{Dims: 4, M: 4, MaxLevel: 4},
 		10,
 	)
-	frozen := hnsw.NewIndex(frozenStorage, hnsw.L2)
+	frozen := hnsw.NewIndex(frozenStorage)
 
 	seg, err := NewSegmentedIndexFrom(dir, head, frozen)
 	if err != nil {

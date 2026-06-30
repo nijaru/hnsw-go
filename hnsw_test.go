@@ -23,7 +23,7 @@ func TestBulkDelete(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2)
+	idx := NewIndex(storage)
 	idx.SetEfSearch(50)
 	idx.SetEfConst(50)
 
@@ -97,7 +97,7 @@ func TestFreelistBookkeeping(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2)
+	idx := NewIndex(storage)
 	idx.SetEfSearch(10)
 	idx.SetEfConst(10)
 
@@ -168,7 +168,7 @@ func TestConcurrentBulkDeleteSearch(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2)
+	idx := NewIndex(storage)
 	idx.SetEfSearch(50)
 	idx.SetEfConst(50)
 
@@ -255,7 +255,7 @@ func TestDelete(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2)
+	idx := NewIndex(storage)
 	idx.SetEfSearch(50)
 	idx.SetEfConst(50)
 
@@ -333,7 +333,7 @@ func TestHNSW(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2)
+	idx := NewIndex(storage)
 	idx.SetEfSearch(100)
 	idx.SetEfConst(100)
 
@@ -406,7 +406,7 @@ func TestGrowTriggered(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2)
+	idx := NewIndex(storage)
 	idx.SetEfSearch(10)
 	idx.SetEfConst(10)
 
@@ -453,7 +453,7 @@ func TestSearchEmptyIndex(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2)
+	idx := NewIndex(storage)
 	idx.SetEfSearch(10)
 	idx.SetEfConst(10)
 
@@ -482,7 +482,7 @@ func TestSearchKZero(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2)
+	idx := NewIndex(storage)
 	idx.SetEfSearch(10)
 	idx.SetEfConst(10)
 
@@ -517,7 +517,7 @@ func TestSearchKGreaterThanNodeCount(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2)
+	idx := NewIndex(storage)
 	idx.SetEfSearch(10)
 	idx.SetEfConst(10)
 
@@ -554,7 +554,7 @@ func TestWrongDimensions(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2)
+	idx := NewIndex(storage)
 	idx.SetEfSearch(10)
 	idx.SetEfConst(10)
 
@@ -596,6 +596,7 @@ func TestCosineDistance(t *testing.T) {
 		M:        4,
 		MMax0:    8,
 		MaxLevel: 4,
+		Distance: DistanceCosine,
 	}
 
 	storage, err := NewStorage(path, config, 100)
@@ -604,7 +605,7 @@ func TestCosineDistance(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, Cosine)
+	idx := NewIndex(storage)
 	idx.SetEfSearch(10)
 	idx.SetEfConst(10)
 
@@ -644,6 +645,7 @@ func TestDotDistance(t *testing.T) {
 		M:        4,
 		MMax0:    8,
 		MaxLevel: 4,
+		Distance: DistanceDot,
 	}
 
 	storage, err := NewStorage(path, config, 100)
@@ -652,7 +654,7 @@ func TestDotDistance(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, Dot)
+	idx := NewIndex(storage)
 	idx.SetEfSearch(10)
 	idx.SetEfConst(10)
 
@@ -700,7 +702,7 @@ func TestConcurrentInsertSearch(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2)
+	idx := NewIndex(storage)
 	idx.SetEfSearch(50)
 	idx.SetEfConst(50)
 
@@ -819,7 +821,7 @@ func TestBatchInsert(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2)
+	idx := NewIndex(storage)
 	idx.SetEfSearch(50)
 	idx.SetEfConst(50)
 
@@ -864,7 +866,7 @@ func TestMultiProbe(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2)
+	idx := NewIndex(storage)
 	idx.SetEfSearch(50)
 	idx.SetEfConst(50)
 
@@ -927,7 +929,7 @@ func TestPersistence(t *testing.T) {
 		}
 		defer storage.Close()
 
-		idx := NewIndex(storage, L2)
+		idx := NewIndex(storage)
 		idx.SetEfSearch(20)
 		idx.SetEfConst(20)
 
@@ -944,7 +946,7 @@ func TestPersistence(t *testing.T) {
 	}
 	defer storage2.Close()
 
-	idx2 := NewIndex(storage2, L2)
+	idx2 := NewIndex(storage2)
 	idx2.SetEfSearch(20)
 	idx2.SetEfConst(20)
 

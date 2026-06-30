@@ -21,7 +21,7 @@ func TestVacuum(t *testing.T) {
 	}
 	defer storage.Close()
 
-	idx := NewIndex(storage, L2)
+	idx := NewIndex(storage)
 	idx.SetEfSearch(50)
 	idx.SetEfConst(50)
 
@@ -116,7 +116,7 @@ func TestVacuumClearsFreelist(t *testing.T) {
 		t.Fatalf("failed to create storage: %v", err)
 	}
 
-	idx := NewIndex(storage, L2)
+	idx := NewIndex(storage)
 	idx.SetEfSearch(32)
 	idx.SetEfConst(32)
 	defer idx.Close()

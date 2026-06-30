@@ -152,7 +152,7 @@ func benchOpenIndex(tb testing.TB, path string, capacity int) *Index {
 		tb.Fatal(err)
 	}
 
-	idx := NewIndex(storage, L2)
+	idx := NewIndex(storage)
 	idx.SetEfSearch(benchEfSearch)
 	idx.SetEfConst(benchEfConst)
 	return idx

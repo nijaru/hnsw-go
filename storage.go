@@ -19,13 +19,14 @@ const (
 )
 
 type IndexConfig struct {
-	Dims     uint32 // Required
-	M        uint32 // Default: 16
-	MMax0    uint32 // Default: 2*M
-	MaxLevel uint32 // Default: 16
-	Probes   uint32 // Default: 1
-	EfSearch uint32 // Default: 64
-	EfConst  uint32 // Default: 200
+	Dims     uint32       // Required
+	M        uint32       // Default: 16
+	MMax0    uint32       // Default: 2*M
+	MaxLevel uint32       // Default: 16
+	Probes   uint32       // Default: 1
+	EfSearch uint32       // Default: 64
+	EfConst  uint32       // Default: 200
+	Distance DistanceType // Required: L2, Cosine, or Dot (runtime-only, not persisted)
 }
 
 type NodeLayout struct {
