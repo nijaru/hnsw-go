@@ -923,6 +923,9 @@ func (s *Storage) grow(newAllocated uint32) error {
 		return fmt.Errorf("vector mmap: %w", err)
 	}
 
+	// Swap old mappings for new. On macOS, Mach VM reference-counts pages
+	// so concurrent readers holding the old mapping won't fault.
+	// TODO: wrap behind atomic.Pointer for cross-platform safety.
 	oldGraph := s.graphData
 	oldVec := s.vecData
 	s.graphData = graphData

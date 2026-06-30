@@ -147,6 +147,7 @@ func benchOpenIndex(tb testing.TB, path string, capacity int) *Index {
 		M:        benchM,
 		MMax0:    benchMMax0,
 		MaxLevel: benchMaxLevel,
+		Distance: DistanceL2,
 	}, uint32(capacity))
 	if err != nil {
 		tb.Fatal(err)
