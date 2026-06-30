@@ -77,23 +77,29 @@ func NewNodeLayout(config IndexConfig) NodeLayout {
 	return l
 }
 
-type Storage struct {
-	path        string
-	graphFile   *os.File
+// mmapData holds the graph and vector memory mappings.
+// Swapped atomically during grow() to keep concurrent readers safe.
+type mmapData struct {
 	graphData   []byte
-	vecFile     *os.File
 	vecData     []byte
-	upperFile   *os.File
-	upperData   []byte
-	delFile     *os.File
-	delData     []byte
-	metaFile    *os.File
-	metaData    []byte
-	config      IndexConfig
-	layout      NodeLayout
 	vectorSlice []float32
-	vecLen      uint32
-	allocMu     sync.Mutex
+}
+
+type Storage struct {
+	path      string
+	graphFile *os.File
+	vecFile   *os.File
+	upperFile *os.File
+	upperData []byte
+	delFile   *os.File
+	delData   []byte
+	metaFile  *os.File
+	metaData  []byte
+	config    IndexConfig
+	layout    NodeLayout
+	data      atomic.Pointer[mmapData]
+	vecLen    uint32
+	allocMu   sync.Mutex
 }
 
 // Path returns the directory path of the storage.
@@ -388,9 +394,7 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 	s := &Storage{
 		path:      path,
 		graphFile: graphFile,
-		graphData: graphData,
 		vecFile:   vecFile,
-		vecData:   vecData,
 		upperFile: upperFile,
 		upperData: upperData,
 		delFile:   delFile,
@@ -401,6 +405,15 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 		layout:    layout,
 		vecLen:    config.Dims,
 	}
+
+	s.data.Store(&mmapData{
+		graphData: graphData,
+		vecData:   vecData,
+		vectorSlice: unsafe.Slice(
+			(*float32)(unsafe.Pointer(&vecData[0])),
+			uint64(len(vecData))/4,
+		),
+	})
 
 	if graphInfo.Size() == 0 || s.readUint32(0) == 0 {
 		s.writeHeader(initialNodes, uint32(upperMmapSize), uint32(metaMmapSize))
@@ -420,23 +433,22 @@ func NewStorage(path string, config IndexConfig, initialNodes uint32) (*Storage,
 		}
 	}
 
-	s.vectorSlice = unsafe.Slice(
-		(*float32)(unsafe.Pointer(&s.vecData[0])),
-		uint64(len(s.vecData))/4,
-	)
-
 	return s, nil
 }
 
 func (s *Storage) Sync() error {
+	data := s.data.Load()
+	if data == nil {
+		return nil
+	}
 	var errs []error
-	if s.graphData != nil {
-		if err := unix.Msync(s.graphData, unix.MS_SYNC); err != nil {
+	if data.graphData != nil {
+		if err := unix.Msync(data.graphData, unix.MS_SYNC); err != nil {
 			errs = append(errs, err)
 		}
 	}
-	if s.vecData != nil {
-		if err := unix.Msync(s.vecData, unix.MS_SYNC); err != nil {
+	if data.vecData != nil {
+		if err := unix.Msync(data.vecData, unix.MS_SYNC); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -462,25 +474,25 @@ func (s *Storage) Sync() error {
 }
 
 func (s *Storage) Close() error {
+	data := s.data.Load()
 	var errs []error
-	if s.graphData != nil {
-		if err := unix.Msync(s.graphData, unix.MS_SYNC); err != nil {
+	if data != nil && data.graphData != nil {
+		if err := unix.Msync(data.graphData, unix.MS_SYNC); err != nil {
 			errs = append(errs, err)
 		}
-		if err := unix.Munmap(s.graphData); err != nil {
+		if err := unix.Munmap(data.graphData); err != nil {
 			errs = append(errs, err)
 		}
-		s.graphData = nil
 	}
-	if s.vecData != nil {
-		if err := unix.Msync(s.vecData, unix.MS_SYNC); err != nil {
+	if data != nil && data.vecData != nil {
+		if err := unix.Msync(data.vecData, unix.MS_SYNC); err != nil {
 			errs = append(errs, err)
 		}
-		if err := unix.Munmap(s.vecData); err != nil {
+		if err := unix.Munmap(data.vecData); err != nil {
 			errs = append(errs, err)
 		}
-		s.vecData = nil
 	}
+	s.data.Store(nil)
 	if s.upperData != nil {
 		if err := unix.Msync(s.upperData, unix.MS_SYNC); err != nil {
 			errs = append(errs, err)
@@ -597,7 +609,8 @@ func (s *Storage) growDeleted(newSize uint32) error {
 }
 
 func (s *Storage) writeHeader(initialNodes, initialUpperSize, initialMetaSize uint32) {
-	copy(s.graphData[0:4], Magic)
+	d := s.data.Load().graphData
+	copy(d[0:4], Magic)
 	s.writeUint32(hdrVersion, 6) // Version 6
 	s.writeUint32(hdrDims, s.config.Dims)
 	s.writeUint32(hdrM, s.config.M)
@@ -618,7 +631,8 @@ func (s *Storage) writeHeader(initialNodes, initialUpperSize, initialMetaSize ui
 }
 
 func (s *Storage) validateHeader() error {
-	magic := string(s.graphData[0:4])
+	d := s.data.Load()
+	magic := string(d.graphData[0:4])
 	if magic != Magic {
 		return fmt.Errorf("invalid hnsw file: bad magic %q", magic)
 	}
@@ -639,11 +653,11 @@ func (s *Storage) validateHeader() error {
 }
 
 func (s *Storage) readUint32(offset uint64) uint32 {
-	return binary.LittleEndian.Uint32(s.graphData[offset : offset+4])
+	return binary.LittleEndian.Uint32(s.data.Load().graphData[offset : offset+4])
 }
 
 func (s *Storage) writeUint32(offset uint64, val uint32) {
-	binary.LittleEndian.PutUint32(s.graphData[offset:offset+4], val)
+	binary.LittleEndian.PutUint32(s.data.Load().graphData[offset:offset+4], val)
 }
 
 func (s *Storage) writeUint32Upper(offset uint64, val uint32) {
@@ -652,25 +666,27 @@ func (s *Storage) writeUint32Upper(offset uint64, val uint32) {
 
 func (s *Storage) GetMaxLevel(id uint32) int {
 	offset := uint64(HeaderSize) + uint64(id)*uint64(s.layout.GraphNodeSize)
-	return int(binary.LittleEndian.Uint32(s.graphData[offset+4 : offset+8]))
+	return int(binary.LittleEndian.Uint32(s.data.Load().graphData[offset+4 : offset+8]))
 }
 
 func (s *Storage) getGraphNode(id uint32) []byte {
+	data := s.data.Load()
 	offset := uint64(HeaderSize) + uint64(id)*uint64(s.layout.GraphNodeSize)
 	end := offset + uint64(s.layout.GraphNodeSize)
-	if end > uint64(len(s.graphData)) {
+	if end > uint64(len(data.graphData)) {
 		panic("hnsw: node id out of bounds")
 	}
-	return s.graphData[offset:end]
+	return data.graphData[offset:end]
 }
 
 func (s *Storage) GetVector(id uint32) []float32 {
+	data := s.data.Load()
 	vecOffset := uint64(id) * uint64(s.layout.VectorSize) / 4
 	end := vecOffset + uint64(s.config.Dims)
-	if end*4 > uint64(len(s.vecData)) {
+	if end*4 > uint64(len(data.vecData)) {
 		panic("hnsw: vector id out of bounds")
 	}
-	return s.vectorSlice[vecOffset : vecOffset+uint64(s.config.Dims)]
+	return data.vectorSlice[vecOffset : vecOffset+uint64(s.config.Dims)]
 }
 
 func (s *Storage) GetMetadata(id uint32) []byte {
@@ -923,25 +939,20 @@ func (s *Storage) grow(newAllocated uint32) error {
 		return fmt.Errorf("vector mmap: %w", err)
 	}
 
-	// Swap old mappings for new. On macOS, Mach VM reference-counts pages
-	// so concurrent readers holding the old mapping won't fault.
-	// TODO: wrap behind atomic.Pointer for cross-platform safety.
-	oldGraph := s.graphData
-	oldVec := s.vecData
-	s.graphData = graphData
-	s.vecData = vecData
+	// Atomically swap in the new mappings. Readers that loaded the old pointer
+	// before this swap continue using the old mappings safely — we never munmap
+	// old data because concurrent readers may still hold references. The OS
+	// reclaims all mappings on Close or process exit.
+	newData := &mmapData{
+		graphData: graphData,
+		vecData:   vecData,
+		vectorSlice: unsafe.Slice(
+			(*float32)(unsafe.Pointer(&vecData[0])),
+			uint64(len(vecData))/4,
+		),
+	}
+	s.data.Store(newData)
 	s.writeUint32(hdrAllocated, newAllocated)
-	s.vectorSlice = unsafe.Slice(
-		(*float32)(unsafe.Pointer(&s.vecData[0])),
-		uint64(len(s.vecData))/4,
-	)
-
-	if oldGraph != nil {
-		unix.Munmap(oldGraph)
-	}
-	if oldVec != nil {
-		unix.Munmap(oldVec)
-	}
 
 	return nil
 }
