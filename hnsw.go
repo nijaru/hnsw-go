@@ -1,3 +1,7 @@
+// Package hnsw implements a high-performance pure Go Hierarchical Navigable Small
+// World (HNSW) graph for approximate nearest neighbor search. It supports zero-
+// allocation search, mmap-backed persistence, thread-safe concurrent mutation,
+// filtered search via allow-lists, and segmented indexes for large-scale workloads.
 package hnsw
 
 import (
@@ -29,6 +33,8 @@ type Index struct {
 	freelist   []uint32
 	rngMu      sync.Mutex
 	rng        *rand.Rand
+	repairGen  uint8
+	repairSeen []uint8
 }
 
 // Path returns the directory path of the underlying storage.
@@ -62,9 +68,9 @@ func NewIndex(storage *Storage, distFunc DistanceFunc) *Index {
 	}
 	idx.scratch.buf.Store(newSearchBuffer(16384, efSearch+mMax0+1, efSearch+1))
 
-	idx.maxLevel = int(storage.readUint32(36))
-	idx.entryPoint = storage.readUint32(24)
-	idx.nodeCount = storage.readUint32(28)
+	idx.maxLevel = int(storage.readUint32(hdrMaxLevelDyn))
+	idx.entryPoint = storage.readUint32(hdrEntryPoint)
+	idx.nodeCount = storage.readUint32(hdrNodeCount)
 
 	return idx
 }
@@ -82,21 +88,21 @@ func (idx *Index) SetProbes(probes int) {
 		probes = 1
 	}
 	idx.probes = probes
-	idx.storage.writeUint32(40, uint32(probes))
+	idx.storage.writeUint32(hdrProbes, uint32(probes))
 	idx.mu.Unlock()
 }
 
 func (idx *Index) SetEfSearch(ef int) {
 	idx.mu.Lock()
 	idx.efSearch = ef
-	idx.storage.writeUint32(44, uint32(ef))
+	idx.storage.writeUint32(hdrEfSearch, uint32(ef))
 	idx.mu.Unlock()
 }
 
 func (idx *Index) SetEfConst(ef int) {
 	idx.mu.Lock()
 	idx.efConst = ef
-	idx.storage.writeUint32(48, uint32(ef))
+	idx.storage.writeUint32(hdrEfConst, uint32(ef))
 	idx.mu.Unlock()
 }
 
@@ -284,45 +290,17 @@ func (idx *Index) CopyMetadata(id uint32) []byte {
 	return out
 }
 
-func (idx *Index) searchIntoWithFilters(
-	dst []Node,
-	query []float32,
-	k int,
-	allow AllowList,
-	allowNode func(Node) bool,
-	planned bool,
-	buf *searchBuffer,
-) ([]Node, error) {
-	if len(query) != int(idx.storage.config.Dims) {
-		return nil, fmt.Errorf(
-			"hnsw: query dims %d != index dims %d",
-			len(query),
-			idx.storage.config.Dims,
-		)
-	}
-	if k <= 0 {
-		return nil, nil
-	}
-
-	idx.mu.RLock()
-	defer idx.mu.RUnlock()
-
-	if atomic.LoadUint32(&idx.nodeCount) == 0 {
-		return nil, nil
-	}
-
-	currMaxLevel := idx.maxLevel
-	currEntryPoint := idx.entryPoint
-	nodeCount := atomic.LoadUint32(&idx.nodeCount)
-	efSearch := idx.efSearch
+// gatherEntryProbes performs greedy descent from the entry point through upper
+// levels (≥1), populating dst with the best entry probes for layer-0 search.
+// dst must have ≥64 capacity. Returns the populated slice (same backing array).
+func (idx *Index) gatherEntryProbes(query []float32, dst []Node) []Node {
 	probes := idx.probes
 
-	var probeBuf [64]Node
-	probeNodes := probeBuf[:0]
-	currDist := idx.dist(query, idx.storage.GetVector(currEntryPoint))
-	probeNodes = append(probeNodes, Node{ID: currEntryPoint, Distance: currDist})
+	probeNodes := dst[:0]
+	currDist := idx.dist(query, idx.storage.GetVector(idx.entryPoint))
+	probeNodes = append(probeNodes, Node{ID: idx.entryPoint, Distance: currDist})
 
-	for level := currMaxLevel; level >= 1; level-- {
+	for level := idx.maxLevel; level >= 1; level-- {
 		changed := true
 		for changed {
 			changed = false
@@ -371,6 +349,42 @@ func (idx *Index) searchIntoWithFilters(
 			}
 		}
 	}
+
+	return probeNodes
+}
+
+func (idx *Index) searchIntoWithFilters(
+	dst []Node,
+	query []float32,
+	k int,
+	allow AllowList,
+	allowNode func(Node) bool,
+	planned bool,
+	buf *searchBuffer,
+) ([]Node, error) {
+	if len(query) != int(idx.storage.config.Dims) {
+		return nil, fmt.Errorf(
+			"hnsw: query dims %d != index dims %d",
+			len(query),
+			idx.storage.config.Dims,
+		)
+	}
+	if k <= 0 {
+		return nil, nil
+	}
+
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+
+	if atomic.LoadUint32(&idx.nodeCount) == 0 {
+		return nil, nil
+	}
+
+	nodeCount := atomic.LoadUint32(&idx.nodeCount)
+	efSearch := idx.efSearch
+
+	var probeBuf [64]Node
+	probeNodes := idx.gatherEntryProbes(query, probeBuf[:])
 
 	buf.reset(nodeCount)
 
@@ -473,70 +487,11 @@ func (idx *Index) searchIntoNoFilter(
 		return nil, nil
 	}
 
-	currMaxLevel := idx.maxLevel
-	currEntryPoint := idx.entryPoint
 	nodeCount := atomic.LoadUint32(&idx.nodeCount)
 	efSearch := idx.efSearch
-	probes := idx.probes
 
 	var probeBuf [64]Node
-	probeNodes := probeBuf[:0]
-	currDist := idx.dist(query, idx.storage.GetVector(currEntryPoint))
-	probeNodes = append(probeNodes, Node{ID: currEntryPoint, Distance: currDist})
-
-	for level := currMaxLevel; level >= 1; level-- {
-		changed := true
-		for changed {
-			changed = false
-			best := probeNodes[0]
-			neighbors := idx.storage.GetNeighbors(best.ID, level)
-			for _, nb := range neighbors {
-				d := idx.dist(query, idx.storage.GetVector(nb))
-				if d < best.Distance {
-					best.Distance = d
-					best.ID = nb
-					changed = true
-				}
-			}
-			if changed {
-				probeNodes[0] = best
-			}
-		}
-
-		if probes > 1 {
-			// Expand from the best node to find more entry points for the next layer
-			best := probeNodes[0]
-			neighbors := idx.storage.GetNeighbors(best.ID, level)
-			for _, nb := range neighbors {
-				d := idx.dist(query, idx.storage.GetVector(nb))
-
-				// Check if already in probes
-				exists := false
-				for _, p := range probeNodes {
-					if p.ID == nb {
-						exists = true
-						break
-					}
-				}
-				if exists {
-					continue
-				}
-
-				if len(probeNodes) < probes {
-					probeNodes = append(probeNodes, Node{ID: nb, Distance: d})
-					// Sort by distance (simple insertion sort for small N)
-					for i := len(probeNodes) - 1; i > 0 && probeNodes[i].Distance < probeNodes[i-1].Distance; i-- {
-						probeNodes[i], probeNodes[i-1] = probeNodes[i-1], probeNodes[i]
-					}
-				} else if d < probeNodes[len(probeNodes)-1].Distance {
-					probeNodes[len(probeNodes)-1] = Node{ID: nb, Distance: d}
-					for i := len(probeNodes) - 1; i > 0 && probeNodes[i].Distance < probeNodes[i-1].Distance; i-- {
-						probeNodes[i], probeNodes[i-1] = probeNodes[i-1], probeNodes[i]
-					}
-				}
-			}
-		}
-	}
+	probeNodes := idx.gatherEntryProbes(query, probeBuf[:])
 
 	buf := idx.acquireSearchBuffer()
 	defer idx.releaseSearchBuffer(buf)
@@ -740,11 +695,11 @@ func (idx *Index) BatchInsert(vecs [][]float32, metas [][]byte) error {
 
 	// 1. Pre-allocate all IDs and grow storage once
 	idx.mu.Lock()
-	startID := idx.nodeCount
+	startID := atomic.LoadUint32(&idx.nodeCount)
 	numVecs := uint32(len(vecs))
 
 	// Ensure storage has enough capacity for the new IDs.
-	allocated := idx.storage.readUint32(32)
+	allocated := idx.storage.readUint32(hdrAllocated)
 	if uint64(startID)+uint64(numVecs) > uint64(allocated) {
 		need := uint32(uint64(startID) + uint64(numVecs))
 		newAllocated := max(allocated*2, need+1000)
@@ -756,7 +711,7 @@ func (idx *Index) BatchInsert(vecs [][]float32, metas [][]byte) error {
 	}
 
 	atomic.AddUint32(&idx.nodeCount, numVecs)
-	idx.storage.writeUint32(28, atomic.LoadUint32(&idx.nodeCount))
+	idx.storage.writeUint32(hdrNodeCount, atomic.LoadUint32(&idx.nodeCount))
 	idx.mu.Unlock()
 
 	// 2. Perform inserts sequentially so graph mutation stays race-free.
@@ -779,8 +734,8 @@ func (idx *Index) insert(id uint32, vec []float32, meta []byte) error {
 		idx.mu.Lock()
 		idx.entryPoint = id
 		idx.maxLevel = level
-		idx.storage.writeUint32(24, id)
-		idx.storage.writeUint32(36, uint32(level))
+		idx.storage.writeUint32(hdrEntryPoint, id)
+		idx.storage.writeUint32(hdrMaxLevelDyn, uint32(level))
 		idx.storage.setLevel(id, level)
 		if err := idx.storage.allocateUpper(id, level); err != nil {
 			idx.mu.Unlock()
@@ -828,8 +783,8 @@ func (idx *Index) insert(id uint32, vec []float32, meta []byte) error {
 		}
 	}
 
-	insertBuf := idx.pool.Get().(*searchBuffer)
-	defer idx.pool.Put(insertBuf)
+	insertBuf := idx.acquireSearchBuffer()
+	defer idx.releaseSearchBuffer(insertBuf)
 
 	for l := min(level, currMaxLevel); l >= 0; l-- {
 		candidates := idx.findNeighborsAtLayer(vec, currNode, l, efConst, nodeCount, insertBuf)
@@ -872,8 +827,8 @@ func (idx *Index) insert(id uint32, vec []float32, meta []byte) error {
 		if level > idx.maxLevel {
 			idx.maxLevel = level
 			idx.entryPoint = id
-			idx.storage.writeUint32(36, uint32(level))
-			idx.storage.writeUint32(24, id)
+			idx.storage.writeUint32(hdrMaxLevelDyn, uint32(level))
+			idx.storage.writeUint32(hdrEntryPoint, id)
 		}
 		idx.mu.Unlock()
 	}
@@ -1098,6 +1053,21 @@ func (idx *Index) BulkDelete(ids []uint32) (int, error) {
 }
 
 func (idx *Index) repairNeighborConnection(id uint32) {
+	// Grow seen array if needed (called under write lock, no concurrency concern).
+	nc := int(atomic.LoadUint32(&idx.nodeCount))
+	if cap(idx.repairSeen) < nc {
+		idx.repairSeen = make([]uint8, nc+2048)
+		idx.repairGen = 0
+	}
+
+	// Bump generation once per call; each u gets its own generation for isolation.
+	idx.repairGen++
+	if idx.repairGen == 0 {
+		clear(idx.repairSeen)
+		idx.repairGen = 1
+	}
+	seen := idx.repairSeen
+
 	maxL := idx.storage.GetMaxLevel(id)
 	for level := 0; level <= maxL; level++ {
 		neighbors := idx.storage.GetNeighbors(id, level)
@@ -1105,8 +1075,9 @@ func (idx *Index) repairNeighborConnection(id uint32) {
 			continue
 		}
 
-		// N2 is the set of points that have 'id' as a neighbor
-		var n2 []uint32
+		// N2 is the set of points that have 'id' as a neighbor.
+		var n2Buf [32]uint32
+		n2 := n2Buf[:0]
 		for _, v := range neighbors {
 			vNb := idx.storage.GetNeighbors(v, level)
 			hasID := false
@@ -1121,54 +1092,57 @@ func (idx *Index) repairNeighborConnection(id uint32) {
 			}
 		}
 
-		// For each u in N2, re-select neighbors from {u's neighbors} + {id's neighbors} - {id}
+		// For each u in N2, re-select neighbors with an isolated generation.
 		for _, u := range n2 {
-			uNb := idx.storage.GetNeighbors(u, level)
+			idx.repairGen++
+			if idx.repairGen == 0 {
+				clear(seen)
+				idx.repairGen = 1
+			}
+			gen := idx.repairGen
 
-			// Build candidate set for u
-			candidates := make([]Node, 0, len(uNb)+len(neighbors))
+			uNb := idx.storage.GetNeighbors(u, level)
 			uVec := idx.storage.GetVector(u)
 
-			seen := make(map[uint32]bool)
-			seen[id] = true // Exclude the deleted node
-			seen[u] = true  // Exclude self
+			seen[id] = gen
+			seen[u] = gen
 
-			// Add u's current neighbors (except id)
+			var candBuf [64]Node
+			candidates := candBuf[:0]
+
 			for _, nbID := range uNb {
-				if !seen[nbID] {
+				if seen[nbID] != gen {
+					seen[nbID] = gen
 					d := idx.dist(uVec, idx.storage.GetVector(nbID))
 					candidates = append(candidates, Node{ID: nbID, Distance: d})
-					seen[nbID] = true
 				}
 			}
-			// Add id's neighbors
 			for _, nbID := range neighbors {
-				if !seen[nbID] {
+				if seen[nbID] != gen {
+					seen[nbID] = gen
 					d := idx.dist(uVec, idx.storage.GetVector(nbID))
 					candidates = append(candidates, Node{ID: nbID, Distance: d})
-					seen[nbID] = true
 				}
 			}
 
-			// Prune using the standard heuristic
 			limit := idx.storage.config.M
 			if level == 0 {
 				limit = idx.storage.config.MMax0
 			}
 
-			// selectNeighbors expects candidates sorted by distance
-			slices.SortFunc(candidates, func(a, b Node) int {
-				if a.Distance < b.Distance {
-					return -1
-				}
-				if a.Distance > b.Distance {
-					return 1
-				}
-				return 0
-			})
-
-			newNb := idx.selectNeighbors(candidates, int(limit))
-			idx.storage.SetNeighbors(u, level, newNb)
+			if len(candidates) > 0 {
+				slices.SortFunc(candidates, func(a, b Node) int {
+					if a.Distance < b.Distance {
+						return -1
+					}
+					if a.Distance > b.Distance {
+						return 1
+					}
+					return 0
+				})
+				newNb := idx.selectNeighbors(candidates, int(limit))
+				idx.storage.SetNeighbors(u, level, newNb)
+			}
 		}
 	}
 }
@@ -1189,7 +1163,7 @@ func (idx *Index) Vacuum() error {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
-	deletedCount := idx.storage.readUint32(48)
+	deletedCount := idx.storage.readUint32(hdrDeletedCount)
 	if deletedCount == 0 {
 		return nil
 	}
@@ -1286,9 +1260,9 @@ func (idx *Index) Vacuum() error {
 	}
 
 	idx.storage = newStorage
-	idx.maxLevel = int(newStorage.readUint32(36))
-	idx.entryPoint = newStorage.readUint32(24)
-	idx.nodeCount = newStorage.readUint32(28)
+	idx.maxLevel = int(newStorage.readUint32(hdrMaxLevelDyn))
+	idx.entryPoint = newStorage.readUint32(hdrEntryPoint)
+	idx.nodeCount = newStorage.readUint32(hdrNodeCount)
 	idx.freelist = nil
 
 	return nil

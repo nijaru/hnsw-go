@@ -7,7 +7,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/omendb/hnsw-go"
+	"github.com/nijaru/hnsw-go"
 )
 
 const (

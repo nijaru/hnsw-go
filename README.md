@@ -8,7 +8,7 @@ Designed for in-process use by AI agents and applications that need fast vector 
 
 - **Paper-faithful algorithm** — Level generation uses `floor(-ln(U) / ln(M))` (Malkov & Yashunin, Algorithm 1). Neighbor selection implements the diversity heuristic (Algorithm 4) with pruned-connection backfill.
 - **Mmap-backed storage** — Graph and vectors live in a memory-mapped file, bypassing the Go GC entirely. Reopen a file and the index is ready.
-- **Zero-allocation search path** — Hot path uses `sync.Pool` for visited sets and heaps. Generation-based `uint8` visited array. Only allocation is the result slice returned to the caller.
+- **Zero-allocation search path** — Hot path uses `sync.Pool` for visited sets and heaps. Generation-based `uint8` visited array. Only allocation is the result slice returned to the caller. Verified: **0 B/op, 0 allocs/op**.
 - **Cache-optimized node layout** — Each node is a single 64-byte-aligned block containing metadata, vector, and all neighbor lists. Node ID directly resolves to a byte offset.
 - **Thread-safe** — `RWMutex` protects mmap remapping during concurrent inserts. Per-node spinlocks for fine-grained neighbor updates.
 - **Config validation** — Opening an existing file verifies stored parameters match the provided config, preventing silent corruption.
@@ -20,7 +20,7 @@ package main
 
 import (
     "fmt"
-    "github.com/omendb/hnsw-go"
+    "github.com/nijaru/hnsw-go"
 )
 
 func main() {
@@ -137,5 +137,9 @@ go tool pprof -http=:0 .profiles/search.cpu.prof
 
 ## Requirements
 
-- Go 1.24+
+- Go 1.26+
 - `golang.org/x/sys/unix` (mmap)
+
+## License
+
+[Elastic License 2.0](LICENSE) — Free for most uses; prohibits providing the software as a hosted or managed service.

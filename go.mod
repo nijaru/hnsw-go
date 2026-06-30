@@ -1,4 +1,4 @@
-module github.com/omendb/hnsw-go
+module github.com/nijaru/hnsw-go
 
 go 1.26.1
 

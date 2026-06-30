@@ -3,7 +3,7 @@ package segment
 import (
 	"testing"
 
-	"github.com/omendb/hnsw-go"
+	"github.com/nijaru/hnsw-go"
 )
 
 func TestSegmentViewStableIDMapping(t *testing.T) {

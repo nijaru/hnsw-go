@@ -5,7 +5,7 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/omendb/hnsw-go"
+	"github.com/nijaru/hnsw-go"
 )
 
 // TermIndex is an embedded inverted index mapping string terms (like tenants or tags)

@@ -2,6 +2,7 @@ package hnsw
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -454,7 +455,7 @@ func (s *Storage) Sync() error {
 		}
 	}
 	if len(errs) > 0 {
-		return fmt.Errorf("sync errors: %v", errs)
+		return errors.Join(errs...)
 	}
 	return nil
 }
@@ -532,7 +533,7 @@ func (s *Storage) Close() error {
 		}
 	}
 	if len(errs) > 0 {
-		return fmt.Errorf("close errors: %v", errs)
+		return errors.Join(errs...)
 	}
 	return nil
 }
@@ -561,15 +562,15 @@ func (s *Storage) SetDeleted(id uint32, deleted bool) {
 	if deleted {
 		if (s.delData[byteIdx] & (1 << bitIdx)) == 0 {
 			s.delData[byteIdx] |= (1 << bitIdx)
-			count := s.readUint32(52)
-			s.writeUint32(52, count+1)
+			count := s.readUint32(hdrDeletedCount)
+			s.writeUint32(hdrDeletedCount, count+1)
 		}
 	} else {
 		if (s.delData[byteIdx] & (1 << bitIdx)) != 0 {
 			s.delData[byteIdx] &^= (1 << bitIdx)
-			count := s.readUint32(52)
+			count := s.readUint32(hdrDeletedCount)
 			if count > 0 {
-				s.writeUint32(52, count-1)
+				s.writeUint32(hdrDeletedCount, count-1)
 			}
 		}
 	}
@@ -596,23 +597,23 @@ func (s *Storage) growDeleted(newSize uint32) error {
 
 func (s *Storage) writeHeader(initialNodes, initialUpperSize, initialMetaSize uint32) {
 	copy(s.graphData[0:4], Magic)
-	s.writeUint32(4, 6) // Version 6
-	s.writeUint32(8, s.config.Dims)
-	s.writeUint32(12, s.config.M)
-	s.writeUint32(16, s.config.MMax0)
-	s.writeUint32(20, s.config.MaxLevel)
-	s.writeUint32(24, 0) // entry point
-	s.writeUint32(28, 0) // node count
-	s.writeUint32(32, initialNodes)
-	s.writeUint32(36, 0) // current max level (dynamic)
-	s.writeUint32(40, s.config.Probes)
-	s.writeUint32(44, s.config.EfSearch)
-	s.writeUint32(48, s.config.EfConst)
-	s.writeUint32(52, 0) // deleted count
-	s.writeUint32(56, 4) // upper used
-	s.writeUint32(60, initialUpperSize)
-	s.writeUint32(64, 4) // meta used
-	s.writeUint32(68, initialMetaSize)
+	s.writeUint32(hdrVersion, 6) // Version 6
+	s.writeUint32(hdrDims, s.config.Dims)
+	s.writeUint32(hdrM, s.config.M)
+	s.writeUint32(hdrMMax0, s.config.MMax0)
+	s.writeUint32(hdrMaxLevel, s.config.MaxLevel)
+	s.writeUint32(hdrEntryPoint, 0) // entry point
+	s.writeUint32(hdrNodeCount, 0)  // node count
+	s.writeUint32(hdrAllocated, initialNodes)
+	s.writeUint32(hdrMaxLevelDyn, 0) // current max level (dynamic)
+	s.writeUint32(hdrProbes, s.config.Probes)
+	s.writeUint32(hdrEfSearch, s.config.EfSearch)
+	s.writeUint32(hdrEfConst, s.config.EfConst)
+	s.writeUint32(hdrDeletedCount, 0) // deleted count
+	s.writeUint32(hdrUpperUsed, 4)    // upper used
+	s.writeUint32(hdrUpperAllocated, initialUpperSize)
+	s.writeUint32(hdrMetaUsed, 4) // meta used
+	s.writeUint32(hdrMetaAllocated, initialMetaSize)
 }
 
 func (s *Storage) validateHeader() error {
@@ -620,18 +621,18 @@ func (s *Storage) validateHeader() error {
 	if magic != Magic {
 		return fmt.Errorf("invalid hnsw file: bad magic %q", magic)
 	}
-	ver := s.readUint32(4)
+	ver := s.readUint32(hdrVersion)
 	if ver < 1 || ver > 6 {
 		return fmt.Errorf("unsupported hnsw version: %d", ver)
 	}
-	s.config.Dims = s.readUint32(8)
-	s.config.M = s.readUint32(12)
-	s.config.MMax0 = s.readUint32(16)
-	s.config.MaxLevel = s.readUint32(20)
+	s.config.Dims = s.readUint32(hdrDims)
+	s.config.M = s.readUint32(hdrM)
+	s.config.MMax0 = s.readUint32(hdrMMax0)
+	s.config.MaxLevel = s.readUint32(hdrMaxLevel)
 	if ver >= 6 {
-		s.config.Probes = s.readUint32(40)
-		s.config.EfSearch = s.readUint32(44)
-		s.config.EfConst = s.readUint32(48)
+		s.config.Probes = s.readUint32(hdrProbes)
+		s.config.EfSearch = s.readUint32(hdrEfSearch)
+		s.config.EfConst = s.readUint32(hdrEfConst)
 	}
 	return nil
 }
@@ -691,8 +692,8 @@ func (s *Storage) SetMetadata(id uint32, meta []byte) error {
 	size := uint32(len(meta))
 
 	s.allocMu.Lock()
-	used := s.readUint32(64)
-	allocated := s.readUint32(68)
+	used := s.readUint32(hdrMetaUsed)
+	allocated := s.readUint32(hdrMetaAllocated)
 
 	if used+size > allocated {
 		newAllocated := max(allocated*2, used+size+4096)
@@ -704,7 +705,7 @@ func (s *Storage) SetMetadata(id uint32, meta []byte) error {
 
 	offset := used
 	copy(s.metaData[offset:offset+size], meta)
-	s.writeUint32(64, used+size)
+	s.writeUint32(hdrMetaUsed, used+size)
 	s.allocMu.Unlock()
 
 	data := s.getGraphNode(id)
@@ -731,7 +732,7 @@ func (s *Storage) growMeta(newAllocated uint32) error {
 
 	oldMeta := s.metaData
 	s.metaData = metaData
-	s.writeUint32(68, newAllocated)
+	s.writeUint32(hdrMetaAllocated, newAllocated)
 
 	if oldMeta != nil {
 		unix.Munmap(oldMeta)
@@ -811,8 +812,8 @@ func (s *Storage) allocateUpper(id uint32, level int) error {
 	size := uint32(level) * (1 + s.config.M) * 4
 
 	s.allocMu.Lock()
-	used := s.readUint32(56)
-	allocated := s.readUint32(60)
+	used := s.readUint32(hdrUpperUsed)
+	allocated := s.readUint32(hdrUpperAllocated)
 
 	if used+size > allocated {
 		newAllocated := max(allocated*2, used+size+4096)
@@ -823,7 +824,7 @@ func (s *Storage) allocateUpper(id uint32, level int) error {
 	}
 
 	offset := used
-	s.writeUint32(56, used+size)
+	s.writeUint32(hdrUpperUsed, used+size)
 	s.allocMu.Unlock()
 
 	data := s.getGraphNode(id)
@@ -849,7 +850,7 @@ func (s *Storage) growUpper(newAllocated uint32) error {
 
 	oldUpper := s.upperData
 	s.upperData = upperData
-	s.writeUint32(60, newAllocated)
+	s.writeUint32(hdrUpperAllocated, newAllocated)
 
 	if oldUpper != nil {
 		unix.Munmap(oldUpper)
@@ -874,8 +875,8 @@ func (s *Storage) addNode() (uint32, error) {
 	s.allocMu.Lock()
 	defer s.allocMu.Unlock()
 
-	nodeCount := s.readUint32(28)
-	allocated := s.readUint32(32)
+	nodeCount := s.readUint32(hdrNodeCount)
+	allocated := s.readUint32(hdrAllocated)
 
 	if nodeCount >= allocated {
 		newAllocated := allocated * 2
@@ -888,7 +889,7 @@ func (s *Storage) addNode() (uint32, error) {
 	}
 
 	id := nodeCount
-	s.writeUint32(28, id+1)
+	s.writeUint32(hdrNodeCount, id+1)
 	return id, nil
 }
 
@@ -925,7 +926,7 @@ func (s *Storage) grow(newAllocated uint32) error {
 	oldVec := s.vecData
 	s.graphData = graphData
 	s.vecData = vecData
-	s.writeUint32(32, newAllocated)
+	s.writeUint32(hdrAllocated, newAllocated)
 	s.vectorSlice = unsafe.Slice(
 		(*float32)(unsafe.Pointer(&s.vecData[0])),
 		uint64(len(s.vecData))/4,

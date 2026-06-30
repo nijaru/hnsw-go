@@ -49,7 +49,8 @@ func TestChooseSearchPlan(t *testing.T) {
 
 			got := chooseSearchPlan(tc.allowLen, tc.k, tc.nodes, tc.efSearch)
 			if got != tc.want {
-				t.Fatalf("chooseSearchPlan(%d, %d, %d, %d) = %v, want %v",
+				t.Fatalf(
+					"chooseSearchPlan(%d, %d, %d, %d) = %v, want %v",
 					tc.allowLen, tc.k, tc.nodes, tc.efSearch, got, tc.want,
 				)
 			}

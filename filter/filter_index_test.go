@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/omendb/hnsw-go"
+	"github.com/nijaru/hnsw-go"
 )
 
 func TestTermIndex(t *testing.T) {

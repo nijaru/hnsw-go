@@ -1,13 +1,13 @@
 package hnsw
 
-import "sync/atomic"
-
+// Node is a search result or candidate in the HNSW graph.
 type Node struct {
 	ID       uint32
 	Distance float32
 	Metadata []byte
 }
 
+// nodeHeap is a min-heap of Node ordered by Distance.
 type nodeHeap struct {
 	Nodes []Node
 }
@@ -50,6 +50,7 @@ func (h *nodeHeap) Pop() Node {
 	return n
 }
 
+// NodeMaxHeap is a max-heap of Node ordered by Distance (used for ef-limited result sets).
 type NodeMaxHeap struct {
 	Nodes []Node
 }
@@ -90,61 +91,4 @@ func (h *NodeMaxHeap) Pop() Node {
 		i = largest
 	}
 	return n
-}
-
-type searchBuffer struct {
-	visited    []uint8
-	results    NodeMaxHeap
-	candidates nodeHeap
-	out        []Node
-	gen        uint8
-}
-
-func newSearchBuffer(visitedCap, heapCap, outCap int) *searchBuffer {
-	if visitedCap < 1 {
-		visitedCap = 1
-	}
-	if heapCap < 1 {
-		heapCap = 1
-	}
-	if outCap < 1 {
-		outCap = 1
-	}
-
-	return &searchBuffer{
-		visited:    make([]uint8, visitedCap),
-		results:    NodeMaxHeap{Nodes: make([]Node, 0, heapCap)},
-		candidates: nodeHeap{Nodes: make([]Node, 0, heapCap)},
-		out:        make([]Node, 0, outCap),
-		gen:        1,
-	}
-}
-
-func (b *searchBuffer) isVisited(id uint32) bool {
-	return b.visited[id] == b.gen
-}
-
-func (b *searchBuffer) visit(id uint32) {
-	b.visited[id] = b.gen
-}
-
-func (b *searchBuffer) reset(maxNodes uint32) {
-	b.gen++
-	if b.gen == 0 {
-		for i := range b.visited {
-			b.visited[i] = 0
-		}
-		b.gen = 1
-	}
-	if uint32(len(b.visited)) < maxNodes {
-		b.visited = make([]uint8, maxNodes+2048)
-		b.gen = 1
-	}
-	b.results.Nodes = b.results.Nodes[:0]
-	b.candidates.Nodes = b.candidates.Nodes[:0]
-	b.out = b.out[:0]
-}
-
-type searchBufferSlot struct {
-	buf atomic.Pointer[searchBuffer]
 }

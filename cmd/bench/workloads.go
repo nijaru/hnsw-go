@@ -10,7 +10,7 @@ import (
 	"slices"
 	"time"
 
-	hnsw "github.com/omendb/hnsw-go"
+	hnsw "github.com/nijaru/hnsw-go"
 )
 
 const (
@@ -391,7 +391,8 @@ func runBuild(ctx *profileContext) error {
 	}
 	elapsed := time.Since(start)
 
-	fmt.Printf("vectors=%d dims=%d elapsed=%s throughput=%.0f vecs/sec\n",
+	fmt.Printf(
+		"vectors=%d dims=%d elapsed=%s throughput=%.0f vecs/sec\n",
 		len(st.vectors),
 		profileDims,
 		elapsed.Round(time.Microsecond),
@@ -435,7 +436,8 @@ func runDelete(ctx *profileContext) error {
 	}
 	elapsed := time.Since(start)
 
-	fmt.Printf("deleted=%d requested=%d elapsed=%s throughput=%.0f ids/sec\n",
+	fmt.Printf(
+		"deleted=%d requested=%d elapsed=%s throughput=%.0f ids/sec\n",
 		deleted,
 		len(st.deleteIDs),
 		elapsed.Round(time.Microsecond),
@@ -558,7 +560,8 @@ func runPlanner(ctx *profileContext) error {
 		}
 		elapsed := time.Since(start)
 
-		fmt.Printf("%s plan=%s recall=%.4f qps=%.0f mean=%s p50=%s p99=%s\n",
+		fmt.Printf(
+			"%s plan=%s recall=%.4f qps=%.0f mean=%s p50=%s p99=%s\n",
 			tc.label(),
 			tc.expected,
 			profileRecall(last, tc.exact),
